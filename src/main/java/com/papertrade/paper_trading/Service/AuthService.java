@@ -14,11 +14,13 @@ import com.papertrade.paper_trading.Security.JwtTokenProvider;
 import com.papertrade.paper_trading.Security.TokenHashService;
 import io.jsonwebtoken.JwtException;
 import java.time.LocalDateTime;
+import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@RequiredArgsConstructor
 public class AuthService {
 
     private static final String TOKEN_TYPE = "Bearer";
@@ -28,20 +30,6 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenProvider jwtTokenProvider;
     private final TokenHashService tokenHashService;
-
-    public AuthService(
-        UserRepository userRepository,
-        RefreshTokenRepository refreshTokenRepository,
-        PasswordEncoder passwordEncoder,
-        JwtTokenProvider jwtTokenProvider,
-        TokenHashService tokenHashService
-    ) {
-        this.userRepository = userRepository;
-        this.refreshTokenRepository = refreshTokenRepository;
-        this.passwordEncoder = passwordEncoder;
-        this.jwtTokenProvider = jwtTokenProvider;
-        this.tokenHashService = tokenHashService;
-    }
 
     @Transactional
     public AuthTokenResponse signup(SignupRequest request) {
