@@ -1,6 +1,10 @@
 spring:
   application:
     name: paper-trading
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
 
 security:
   jwt:
@@ -12,3 +16,7 @@ toss-invest:
   openapi:
     base-url: https://openapi.tossinvest.com
     secret-token: ${TOSS_INVEST_SECRET_TOKEN:}
+
+market-calendar:
+  cache:
+    ttl-hours: ${MARKET_CALENDAR_CACHE_TTL_HOURS:12}
