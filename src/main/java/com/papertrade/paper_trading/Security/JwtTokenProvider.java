@@ -11,9 +11,11 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Date;
 import javax.crypto.SecretKey;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 @Component
+@RequiredArgsConstructor
 public class JwtTokenProvider {
 
     private static final String TOKEN_TYPE_CLAIM = "typ";
@@ -21,12 +23,6 @@ public class JwtTokenProvider {
     private static final String REFRESH_TOKEN_TYPE = "refresh";
 
     private final JwtProperties properties;
-    private final SecretKey secretKey;
-
-    public JwtTokenProvider(JwtProperties properties) {
-        this.properties = properties;
-        this.secretKey = Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
-    }
 
     public String createAccessToken(User user) {
         return createToken(user, ACCESS_TOKEN_TYPE, Duration.ofMinutes(properties.accessTokenExpirationMinutes()));
@@ -63,15 +59,19 @@ public class JwtTokenProvider {
             .claim(TOKEN_TYPE_CLAIM, tokenType)
             .issuedAt(Date.from(now))
             .expiration(Date.from(expiresAt))
-            .signWith(secretKey, Jwts.SIG.HS256)
+            .signWith(secretKey(), Jwts.SIG.HS256)
             .compact();
     }
 
     private Claims parseClaims(String token) {
         return Jwts.parser()
-            .verifyWith(secretKey)
+            .verifyWith(secretKey())
             .build()
             .parseSignedClaims(token)
             .getPayload();
+    }
+
+    private SecretKey secretKey() {
+        return Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
     }
 }

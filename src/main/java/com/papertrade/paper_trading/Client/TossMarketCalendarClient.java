@@ -1,7 +1,7 @@
 package com.papertrade.paper_trading.Client;
 
 import com.papertrade.paper_trading.Config.TossInvestProperties;
-import com.papertrade.paper_trading.Dto.OrderBookResponse;
+import com.papertrade.paper_trading.Dto.MarketCalendarResponse;
 import com.papertrade.paper_trading.Dto.TossOpenApiError;
 import com.papertrade.paper_trading.Dto.TossOpenApiErrorResponse;
 import java.io.IOException;
@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDate;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
@@ -19,7 +20,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 @Component
 @RequiredArgsConstructor
-public class TossOrderBookClient {
+public class TossMarketCalendarClient {
 
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
@@ -29,11 +30,11 @@ public class TossOrderBookClient {
         .connectTimeout(REQUEST_TIMEOUT)
         .build();
 
-    public OrderBookResponse getOrderBook(String symbol) {
+    public MarketCalendarResponse getUsMarketCalendar(LocalDate date) {
         validateSecretToken();
 
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(orderBookUri(symbol))
+            .uri(marketCalendarUri(date))
             .timeout(REQUEST_TIMEOUT)
             .header("Authorization", "Bearer " + properties.secretToken())
             .GET()
@@ -43,21 +44,26 @@ public class TossOrderBookClient {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             return handleResponse(response);
         } catch (IOException e) {
-            throw new IllegalStateException("Failed to call Toss order book API", e);
+            throw new IllegalStateException("Failed to call Toss market calendar API", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Toss order book API call was interrupted", e);
+            throw new IllegalStateException("Toss market calendar API call was interrupted", e);
         }
     }
 
-    private URI orderBookUri(String symbol) {
-        String encodedSymbol = URLEncoder.encode(symbol, StandardCharsets.UTF_8);
-        return URI.create(properties.baseUrl() + "/api/v1/orderbook?symbol=" + encodedSymbol);
+    private URI marketCalendarUri(LocalDate date) {
+        String uri = properties.baseUrl() + "/api/v1/market-calendar/US";
+        if (date == null) {
+            return URI.create(uri);
+        }
+
+        String encodedDate = URLEncoder.encode(date.toString(), StandardCharsets.UTF_8);
+        return URI.create(uri + "?date=" + encodedDate);
     }
 
-    private OrderBookResponse handleResponse(HttpResponse<String> response) throws JacksonException {
+    private MarketCalendarResponse handleResponse(HttpResponse<String> response) throws JacksonException {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
-            return jsonMapper.readValue(response.body(), OrderBookResponse.class);
+            return jsonMapper.readValue(response.body(), MarketCalendarResponse.class);
         }
 
         TossOpenApiError error = parseError(response.body());
