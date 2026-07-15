@@ -7,3 +7,8 @@ security:
     secret: ${JWT_SECRET:paper-trading-local-development-jwt-secret-key-change-me}
     access-token-expiration-minutes: 30
     refresh-token-expiration-days: 14
+
+toss-invest:
+  openapi:
+    base-url: https://openapi.tossinvest.com
+    secret-token: ${TOSS_INVEST_SECRET_TOKEN:}
