@@ -10,55 +10,47 @@ import org.springframework.stereotype.Component;
 @Component
 public class OrderBookSubscriptionRegistry {
 
-    private final Map<String, Map<String, String>> sessionSubscriptionSymbols = new HashMap<>();
+    // Map<sessionId, Map<symbol, subscriptionId>>
+    private final Map<String, Map<String, String>> sessionSymbolSubscriptions = new HashMap<>();
     private final Map<String, Integer> symbolSubscriberCounts = new HashMap<>();
 
     public synchronized void subscribe(String sessionId, String subscriptionId, String symbol) {
-        Map<String, String> subscriptions = sessionSubscriptionSymbols.computeIfAbsent(
+        Map<String, String> symbolSubscriptions = sessionSymbolSubscriptions.computeIfAbsent(
             sessionId,
             ignored -> new HashMap<>()
         );
-        String previousSymbol = subscriptions.put(subscriptionId, symbol);
 
-        if (symbol.equals(previousSymbol)) {
-            return;
+        String previousSubscriptionId = symbolSubscriptions.put(symbol, subscriptionId);
+        if (previousSubscriptionId == null) {
+            symbolSubscriberCounts.merge(symbol, 1, Integer::sum);
         }
-
-        if (previousSymbol != null) {
-            decrementSubscriberCount(previousSymbol);
-        }
-        symbolSubscriberCounts.merge(symbol, 1, Integer::sum);
     }
 
     public synchronized void unsubscribe(String sessionId, String subscriptionId) {
-        Map<String, String> subscriptions = sessionSubscriptionSymbols.get(sessionId);
-        if (subscriptions == null) {
+        Map<String, String> symbolSubscriptions = sessionSymbolSubscriptions.get(sessionId);
+        if (symbolSubscriptions == null) {
             return;
         }
 
-        String symbol = subscriptions.remove(subscriptionId);
+        String symbol = findSymbolBySubscriptionId(symbolSubscriptions, subscriptionId);
         if (symbol != null) {
+            symbolSubscriptions.remove(symbol);
             decrementSubscriberCount(symbol);
         }
 
-        if (subscriptions.isEmpty()) {
-            sessionSubscriptionSymbols.remove(sessionId);
+        if (symbolSubscriptions.isEmpty()) {
+            sessionSymbolSubscriptions.remove(sessionId);
         }
     }
 
     public synchronized void disconnect(String sessionId) {
-        Map<String, String> subscriptions = sessionSubscriptionSymbols.remove(sessionId);
-        if (subscriptions == null) {
+        Map<String, String> symbolSubscriptions = sessionSymbolSubscriptions.remove(sessionId);
+        if (symbolSubscriptions == null) {
             return;
         }
 
-        for (String symbol : new HashSet<>(subscriptions.values())) {
-            long removedCount = subscriptions.values().stream()
-                .filter(symbol::equals)
-                .count();
-            for (int i = 0; i < removedCount; i++) {
-                decrementSubscriberCount(symbol);
-            }
+        for (String symbol : symbolSubscriptions.keySet()) {
+            decrementSubscriberCount(symbol);
         }
     }
 
@@ -73,5 +65,13 @@ public class OrderBookSubscriptionRegistry {
         } else {
             symbolSubscriberCounts.put(symbol, subscriberCount);
         }
+    }
+
+    private String findSymbolBySubscriptionId(Map<String, String> symbolSubscriptions, String subscriptionId) {
+        return symbolSubscriptions.entrySet().stream()
+            .filter(entry -> subscriptionId.equals(entry.getValue()))
+            .map(Map.Entry::getKey)
+            .findFirst()
+            .orElse(null);
     }
 }
