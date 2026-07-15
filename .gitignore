@@ -1,4 +1,10 @@
 HELP.md
+.env
+
+### AI docs ###
+AGENTS.md
+docs/entity-spec.md
+
 .gradle
 build/
 !gradle/wrapper/gradle-wrapper.jar

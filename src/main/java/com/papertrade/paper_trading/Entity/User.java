@@ -1,7 +1,7 @@
 package com.papertrade.paper_trading.Entity;
 
-import com.papertrade.paper_trading.Enum.Status;
 import com.papertrade.paper_trading.Enum.Role;
+import com.papertrade.paper_trading.Enum.Status;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -34,8 +34,8 @@ public class User {
     @Column(nullable = false, unique = true)
     private String email;
 
-    @Column(nullable = false)
-    private String password;
+    @Column(name = "password_hash", nullable = false)
+    private String passwordHash;
 
     @Column(length = 50, nullable = false, unique = true)
     private String nickname;

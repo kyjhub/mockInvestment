@@ -1,3 +1,9 @@
 spring:
   application:
     name: paper-trading
+
+security:
+  jwt:
+    secret: ${JWT_SECRET:paper-trading-local-development-jwt-secret-key-change-me}
+    access-token-expiration-minutes: 30
+    refresh-token-expiration-days: 14
