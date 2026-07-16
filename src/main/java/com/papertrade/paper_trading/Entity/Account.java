@@ -71,4 +71,16 @@ public class Account {
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
+
+    public void debitCash(BigDecimal amount) {
+        this.cashBalance = this.cashBalance.subtract(amount);
+    }
+
+    public void creditCash(BigDecimal amount) {
+        this.cashBalance = this.cashBalance.add(amount);
+    }
+
+    public void addRealizedProfit(BigDecimal profitAmount) {
+        this.realizedProfit = this.realizedProfit.add(profitAmount);
+    }
 }
