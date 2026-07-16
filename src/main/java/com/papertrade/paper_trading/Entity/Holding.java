@@ -11,6 +11,7 @@ import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
@@ -29,6 +30,9 @@ import org.hibernate.annotations.UpdateTimestamp;
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
 @Builder
 public class Holding {
+
+    private static final int MONEY_SCALE = 2;
+    private static final int PRICE_SCALE = 4;
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -54,4 +58,43 @@ public class Holding {
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
+
+    public static Holding create(Account account, Stock stock) {
+        return Holding.builder()
+            .account(account)
+            .stock(stock)
+            .quantity(0L)
+            .averagePrice(BigDecimal.ZERO.setScale(PRICE_SCALE, RoundingMode.HALF_UP))
+            .totalPurchaseAmount(BigDecimal.ZERO.setScale(MONEY_SCALE, RoundingMode.HALF_UP))
+            .build();
+    }
+
+    public void buy(Long buyQuantity, BigDecimal price) {
+        BigDecimal purchaseAmount = price.multiply(BigDecimal.valueOf(buyQuantity))
+            .setScale(MONEY_SCALE, RoundingMode.HALF_UP);
+
+        this.quantity += buyQuantity;
+        this.totalPurchaseAmount = this.totalPurchaseAmount.add(purchaseAmount);
+        this.averagePrice = this.totalPurchaseAmount
+            .divide(BigDecimal.valueOf(this.quantity), PRICE_SCALE, RoundingMode.HALF_UP);
+    }
+
+    public BigDecimal sell(Long sellQuantity) {
+        if (this.quantity < sellQuantity) {
+            throw new IllegalArgumentException("보유 수량이 부족합니다.");
+        }
+
+        BigDecimal costBasis = this.averagePrice.multiply(BigDecimal.valueOf(sellQuantity))
+            .setScale(MONEY_SCALE, RoundingMode.HALF_UP);
+
+        this.quantity -= sellQuantity;
+        this.totalPurchaseAmount = this.totalPurchaseAmount.subtract(costBasis);
+
+        if (this.quantity == 0) {
+            this.averagePrice = BigDecimal.ZERO.setScale(PRICE_SCALE, RoundingMode.HALF_UP);
+            this.totalPurchaseAmount = BigDecimal.ZERO.setScale(MONEY_SCALE, RoundingMode.HALF_UP);
+        }
+
+        return costBasis;
+    }
 }

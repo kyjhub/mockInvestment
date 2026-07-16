@@ -14,6 +14,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import lombok.AccessLevel;
@@ -27,7 +28,10 @@ import org.hibernate.annotations.UpdateTimestamp;
 
 @Getter
 @Entity
-@Table(name = "orders")
+@Table(
+    name = "orders",
+    uniqueConstraints = @UniqueConstraint(columnNames = {"account_id", "client_order_id"})
+)
 @Check(constraints = "order_quantity > 0 and filled_quantity >= 0 and remaining_quantity >= 0 and filled_quantity + remaining_quantity = order_quantity")
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
@@ -45,6 +49,9 @@ public class Order {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "stock_id", nullable = false)
     private Stock stock;
+
+    @Column(name = "client_order_id", length = 36)
+    private String clientOrderId;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "order_side", length = 10, nullable = false)
@@ -81,4 +88,39 @@ public class Order {
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
+
+    public static Order create(
+        Account account,
+        Stock stock,
+        String clientOrderId,
+        OrderSide orderSide,
+        OrderType orderType,
+        BigDecimal orderPrice,
+        Long orderQuantity
+    ) {
+        return Order.builder()
+            .account(account)
+            .stock(stock)
+            .clientOrderId(clientOrderId)
+            .orderSide(orderSide)
+            .orderType(orderType)
+            .orderPrice(orderPrice)
+            .orderQuantity(orderQuantity)
+            .filledQuantity(0L)
+            .remainingQuantity(orderQuantity)
+            .status(OrderStatus.PENDING)
+            .build();
+    }
+
+    public void fill(Long quantity) {
+        this.filledQuantity += quantity;
+        this.remainingQuantity -= quantity;
+        this.status = this.remainingQuantity == 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+    }
+
+    public void waitRemainingAt(BigDecimal waitingPrice) {
+        if (this.remainingQuantity > 0) {
+            this.orderPrice = waitingPrice;
+        }
+    }
 }
