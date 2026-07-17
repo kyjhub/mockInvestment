@@ -140,7 +140,7 @@ public class PriceService {
             );
             return Boolean.TRUE.equals(acquired);
         } catch (RuntimeException ignored) {
-            return true;
+            return false;
         }
     }
 

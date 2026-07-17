@@ -57,9 +57,13 @@ public class TossCandleClient {
             + "&interval=1d&count=1&adjusted=true");
     }
 
-    private CandleResponse handleResponse(HttpResponse<String> response) throws JacksonException {
+    private CandleResponse handleResponse(HttpResponse<String> response) {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
-            return jsonMapper.readValue(response.body(), CandleResponse.class);
+            try {
+                return jsonMapper.readValue(response.body(), CandleResponse.class);
+            } catch (JacksonException e) {
+                throw new IllegalStateException("Failed to parse Toss candles API response", e);
+            }
         }
 
         TossOpenApiError error = parseError(response.body());

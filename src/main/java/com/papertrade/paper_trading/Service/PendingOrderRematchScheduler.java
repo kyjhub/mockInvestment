@@ -1,39 +1,35 @@
 package com.papertrade.paper_trading.Service;
 
+import com.papertrade.paper_trading.Dto.SymbolMatchRequestedEvent;
 import com.papertrade.paper_trading.Enum.OrderStatus;
 import com.papertrade.paper_trading.Repository.OrderRepository;
 import com.papertrade.paper_trading.Repository.StockRepository;
-import com.papertrade.paper_trading.WebSocket.OrderBookSubscriptionRegistry;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
-public class OrderBookPollingService {
+public class PendingOrderRematchScheduler {
 
     private static final List<OrderStatus> MATCHABLE_STATUSES = List.of(
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
     );
 
-    private final OrderBookSubscriptionRegistry subscriptionRegistry;
-    private final OrderBookService orderBookService;
     private final OrderRepository orderRepository;
     private final StockRepository stockRepository;
+    private final SymbolMatchRequestedStreamPublisher symbolMatchRequestedStreamPublisher;
 
-    @Scheduled(fixedDelayString = "${orderbook.polling.fixed-delay-ms:1000}")
-    public void pollActiveOrderBooks() {
-        Set<String> symbols = new HashSet<>(subscriptionRegistry.activeSymbols());
+    @Scheduled(fixedDelayString = "${matching-engine.rematch.fixed-delay-ms:30000}")
+    public void rematchPendingOrders() {
         for (Long stockId : orderRepository.findDistinctStockIdsByStatusIn(MATCHABLE_STATUSES)) {
-            stockRepository.findById(stockId).ifPresent(stock -> symbols.add(stock.getSymbol()));
-        }
-
-        for (String symbol : symbols) {
-            orderBookService.refreshAndPublish(symbol);
+            stockRepository.findById(stockId).ifPresent(stock ->
+                symbolMatchRequestedStreamPublisher.publish(
+                    new SymbolMatchRequestedEvent(stock.getSymbol(), "SAFETY_NET")
+                )
+            );
         }
     }
 }

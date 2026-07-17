@@ -61,9 +61,13 @@ public class TossMarketCalendarClient {
         return URI.create(uri + "?date=" + encodedDate);
     }
 
-    private MarketCalendarResponse handleResponse(HttpResponse<String> response) throws JacksonException {
+    private MarketCalendarResponse handleResponse(HttpResponse<String> response) {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
-            return jsonMapper.readValue(response.body(), MarketCalendarResponse.class);
+            try {
+                return jsonMapper.readValue(response.body(), MarketCalendarResponse.class);
+            } catch (JacksonException e) {
+                throw new IllegalStateException("Failed to parse Toss market calendar API response", e);
+            }
         }
 
         TossOpenApiError error = parseError(response.body());

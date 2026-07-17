@@ -1,5 +1,7 @@
 package com.papertrade.paper_trading.Service;
 
+import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
+import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -31,12 +33,14 @@ import org.springframework.stereotype.Service;
 public class MatchingEngineStreamConsumer {
 
     private static final String CONSUMER_GROUP = "matching-engine";
-    private static final String RETRY_COUNT_HASH_KEY = "orders:submitted:retry-counts";
-    private static final String DLQ_STREAM_KEY = "orders:submitted:dlq";
+    private static final String RETRY_COUNT_HASH_KEY = "symbols:match-requested:retry-counts";
+    private static final String DLQ_STREAM_KEY = "symbols:match-requested:dlq";
 
     private final StringRedisTemplate stringRedisTemplate;
     private final MatchingEngineTransactionService matchingEngineTransactionService;
     private final SymbolOrderLockService symbolOrderLockService;
+    private final OrderBookService orderBookService;
+    private final DailyPriceRangeService dailyPriceRangeService;
 
     @Value("${matching-engine.stream.batch-size:10}")
     private int batchSize;
@@ -59,15 +63,17 @@ public class MatchingEngineStreamConsumer {
     @PostConstruct
     public void initializeConsumerGroup() {
         try {
-            Boolean streamExists = stringRedisTemplate.hasKey(OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY);
+            Boolean streamExists = stringRedisTemplate.hasKey(
+                SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY
+            );
             if (!Boolean.TRUE.equals(streamExists)) {
                 stringRedisTemplate.opsForStream().add(
-                    OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY,
+                    SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY,
                     Map.of("type", "bootstrap")
                 );
             }
             stringRedisTemplate.opsForStream().createGroup(
-                OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY,
+                SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY,
                 ReadOffset.from("0-0"),
                 CONSUMER_GROUP
             );
@@ -76,11 +82,14 @@ public class MatchingEngineStreamConsumer {
     }
 
     @Scheduled(fixedDelayString = "${matching-engine.polling.fixed-delay-ms:100}")
-    public void consumeSubmittedOrders() {
+    public void consumeMatchRequests() {
         List<MapRecord<String, Object, Object>> records = stringRedisTemplate.opsForStream().read(
             Consumer.from(CONSUMER_GROUP, consumerName),
             StreamReadOptions.empty().count(batchSize).block(Duration.ofMillis(100)),
-            StreamOffset.create(OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY, ReadOffset.lastConsumed())
+            StreamOffset.create(
+                SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY,
+                ReadOffset.lastConsumed()
+            )
         );
 
         if (records == null || records.isEmpty()) {
@@ -95,7 +104,7 @@ public class MatchingEngineStreamConsumer {
     @Scheduled(fixedDelayString = "${matching-engine.stream.pending-recovery-delay-ms:1000}")
     public void recoverPendingOrders() {
         PendingMessages pendingMessages = stringRedisTemplate.opsForStream().pending(
-            OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY,
+            SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY,
             CONSUMER_GROUP,
             Range.unbounded(),
             pendingBatchSize
@@ -115,7 +124,7 @@ public class MatchingEngineStreamConsumer {
         }
 
         List<MapRecord<String, Object, Object>> claimedRecords = stringRedisTemplate.opsForStream().claim(
-            OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY,
+            SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY,
             CONSUMER_GROUP,
             consumerName,
             Duration.ofMillis(pendingMinIdleMs),
@@ -133,18 +142,19 @@ public class MatchingEngineStreamConsumer {
 
     private void processRecord(MapRecord<String, Object, Object> record) {
         Map<Object, Object> value = record.getValue();
-        if (!value.containsKey("orderId")) {
+        if (!value.containsKey("symbol")) {
             acknowledge(record);
             return;
         }
 
-        Long orderId;
         String symbol;
         try {
-            orderId = Long.valueOf(value.get("orderId").toString());
             symbol = value.get("symbol").toString();
+            if (symbol.isBlank()) {
+                throw new IllegalArgumentException("symbol is blank");
+            }
         } catch (Exception e) {
-            handleFailure(record, new IllegalArgumentException("Invalid order submitted stream payload", e));
+            handleFailure(record, new IllegalArgumentException("Invalid symbol match stream payload", e));
             return;
         }
 
@@ -157,7 +167,7 @@ public class MatchingEngineStreamConsumer {
         }
 
         try {
-            matchingEngineTransactionService.matchOrder(orderId);
+            matchUntilOrderBookVersionIsStable(symbol);
             acknowledge(record);
             clearRetryCount(record);
         } catch (Exception e) {
@@ -165,6 +175,18 @@ public class MatchingEngineStreamConsumer {
         } finally {
             symbolOrderLockService.release(symbol, lockValue);
         }
+    }
+
+    private void matchUntilOrderBookVersionIsStable(String symbol) {
+        long versionBeforeMatching;
+        long versionAfterMatching;
+        do {
+            versionBeforeMatching = orderBookService.getOrderBookVersion(symbol);
+            OrderBookResponse orderBook = orderBookService.getOrderBook(symbol);
+            DailyPriceRangeResponse dailyPriceRange = dailyPriceRangeService.getDailyPriceRange(symbol);
+            matchingEngineTransactionService.matchSymbol(symbol, orderBook, dailyPriceRange);
+            versionAfterMatching = orderBookService.getOrderBookVersion(symbol);
+        } while (versionAfterMatching != versionBeforeMatching);
     }
 
     private void handleFailure(MapRecord<String, Object, Object> record, Exception e) {
@@ -192,7 +214,7 @@ public class MatchingEngineStreamConsumer {
 
     private void moveToDeadLetterQueue(MapRecord<String, Object, Object> record, Exception e, Long retryCount) {
         Map<String, String> dlqValue = new LinkedHashMap<>();
-        dlqValue.put("sourceStream", OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY);
+        dlqValue.put("sourceStream", SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY);
         dlqValue.put("sourceRecordId", record.getId().getValue());
         dlqValue.put("consumerGroup", CONSUMER_GROUP);
         dlqValue.put("consumerName", consumerName);
@@ -222,7 +244,7 @@ public class MatchingEngineStreamConsumer {
 
     private void acknowledge(MapRecord<String, Object, Object> record) {
         stringRedisTemplate.opsForStream().acknowledge(
-            OrderSubmittedStreamPublisher.ORDER_SUBMITTED_STREAM_KEY,
+            SymbolMatchRequestedStreamPublisher.SYMBOL_MATCH_REQUESTED_STREAM_KEY,
             CONSUMER_GROUP,
             record.getId()
         );

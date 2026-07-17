@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -36,7 +37,8 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         @Param("incomingOrderId") Long incomingOrderId,
         @Param("stockId") Long stockId,
         @Param("maxPrice") BigDecimal maxPrice,
-        @Param("statuses") Collection<OrderStatus> statuses
+        @Param("statuses") Collection<OrderStatus> statuses,
+        Pageable pageable
     );
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -55,6 +57,28 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         @Param("incomingOrderId") Long incomingOrderId,
         @Param("stockId") Long stockId,
         @Param("minPrice") BigDecimal minPrice,
+        @Param("statuses") Collection<OrderStatus> statuses,
+        Pageable pageable
+    );
+
+    @Query("select distinct o.stock.id from Order o where o.status in :statuses")
+    List<Long> findDistinctStockIdsByStatusIn(@Param("statuses") Collection<OrderStatus> statuses);
+
+    @Query("""
+        select o.id from Order o
+        where o.stock.symbol = :symbol
+          and o.status in :statuses
+          and o.remainingQuantity > 0
+        order by
+          case when o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY then 0 else 1 end,
+          case when o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY then o.orderPrice end desc,
+          case when o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.SELL then o.orderPrice end asc,
+          o.submittedAt asc,
+          o.remainingQuantity desc
+        """)
+    List<Long> findMatchableIdsBySymbol(
+        @Param("symbol") String symbol,
         @Param("statuses") Collection<OrderStatus> statuses
     );
+
 }
