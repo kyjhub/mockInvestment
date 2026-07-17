@@ -57,9 +57,13 @@ public class TossPriceClient {
         return URI.create(properties.baseUrl() + "/api/v1/prices?symbols=" + encodedSymbols);
     }
 
-    private PriceResponse handleResponse(HttpResponse<String> response) throws JacksonException {
+    private PriceResponse handleResponse(HttpResponse<String> response) {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
-            return jsonMapper.readValue(response.body(), PriceResponse.class);
+            try {
+                return jsonMapper.readValue(response.body(), PriceResponse.class);
+            } catch (JacksonException e) {
+                throw new IllegalStateException("Failed to parse Toss prices API response", e);
+            }
         }
 
         TossOpenApiError error = parseError(response.body());

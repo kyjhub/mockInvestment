@@ -27,3 +27,9 @@ orderbook:
   polling:
     fixed-delay-ms: ${ORDERBOOK_POLLING_FIXED_DELAY_MS:1000}
     lock-ttl-ms: ${ORDERBOOK_POLLING_LOCK_TTL_MS:900}
+
+matching-engine:
+  rematch:
+    fixed-delay-ms: ${MATCHING_ENGINE_REMATCH_FIXED_DELAY_MS:30000}
+  lock:
+    ttl-ms: ${MATCHING_ENGINE_LOCK_TTL_MS:15000}

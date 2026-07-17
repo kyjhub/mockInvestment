@@ -55,9 +55,13 @@ public class TossOrderBookClient {
         return URI.create(properties.baseUrl() + "/api/v1/orderbook?symbol=" + encodedSymbol);
     }
 
-    private OrderBookResponse handleResponse(HttpResponse<String> response) throws JacksonException {
+    private OrderBookResponse handleResponse(HttpResponse<String> response) {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
-            return jsonMapper.readValue(response.body(), OrderBookResponse.class);
+            try {
+                return jsonMapper.readValue(response.body(), OrderBookResponse.class);
+            } catch (JacksonException e) {
+                throw new IllegalStateException("Failed to parse Toss order book API response", e);
+            }
         }
 
         TossOpenApiError error = parseError(response.body());

@@ -8,7 +8,6 @@ import com.papertrade.paper_trading.Entity.CashTransaction;
 import com.papertrade.paper_trading.Entity.Execution;
 import com.papertrade.paper_trading.Entity.Holding;
 import com.papertrade.paper_trading.Entity.Order;
-import com.papertrade.paper_trading.Entity.Stock;
 import com.papertrade.paper_trading.Enum.CashTransactionType;
 import com.papertrade.paper_trading.Enum.OrderSide;
 import com.papertrade.paper_trading.Enum.OrderStatus;
@@ -23,15 +22,19 @@ import java.math.RoundingMode;
 import java.util.Comparator;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 @RequiredArgsConstructor
 public class MatchingEngineTransactionService {
 
     private static final int MONEY_SCALE = 2;
-    private static final BigDecimal ZERO_MONEY = BigDecimal.ZERO.setScale(MONEY_SCALE, RoundingMode.HALF_UP);
+    private static final Pageable FIRST_MATCHABLE_ORDER = PageRequest.of(0, 1);
     private static final List<OrderStatus> MATCHABLE_STATUSES = List.of(
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
@@ -42,21 +45,30 @@ public class MatchingEngineTransactionService {
     private final ExecutionRepository executionRepository;
     private final HoldingRepository holdingRepository;
     private final CashTransactionRepository cashTransactionRepository;
-    private final OrderBookService orderBookService;
     private final DailyPriceRangeService dailyPriceRangeService;
+    private final CommissionCalculator commissionCalculator;
+    private final PlatformTransactionManager transactionManager;
+
+    public void matchSymbol(
+        String symbol,
+        OrderBookResponse orderBook,
+        DailyPriceRangeResponse dailyPriceRange
+    ) {
+        List<Long> orderIds = orderRepository.findMatchableIdsBySymbol(symbol, MATCHABLE_STATUSES);
+        TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
+        for (Long orderId : orderIds) {
+            transactionTemplate.executeWithoutResult(ignored -> matchOrder(orderId, orderBook, dailyPriceRange));
+        }
+    }
 
     @Transactional
-    public void matchOrder(Long orderId) {
+    public void matchOrder(Long orderId, OrderBookResponse orderBook, DailyPriceRangeResponse dailyPriceRange) {
         Order incomingOrder = orderRepository.findByIdForUpdate(orderId)
             .orElseThrow(() -> new IllegalArgumentException("주문을 찾을 수 없습니다."));
 
         if (!MATCHABLE_STATUSES.contains(incomingOrder.getStatus())) {
             return;
         }
-
-        Stock stock = incomingOrder.getStock();
-        DailyPriceRangeResponse dailyPriceRange = getDailyPriceRangeIfMarketOrder(incomingOrder);
-        OrderBookResponse orderBook = orderBookService.getOrderBook(stock.getSymbol());
 
         if (incomingOrder.getOrderSide() == OrderSide.BUY) {
             matchBuyOrder(incomingOrder, orderBook, dailyPriceRange);
@@ -102,6 +114,10 @@ public class MatchingEngineTransactionService {
             } else {
                 long availableExternalQuantity = externalAsk.volume() - consumedExternalAskQuantity;
                 Long executionQuantity = Math.min(buyOrder.getRemainingQuantity(), availableExternalQuantity);
+                if (executionQuantity <= 0) {
+                    break;
+                }
+
                 executeExternalBuy(buyOrder, buyerAccount, buyerHolding, externalAsk.price(), executionQuantity);
                 consumedExternalAskQuantity += executionQuantity;
                 if (consumedExternalAskQuantity >= externalAsk.volume()) {
@@ -259,7 +275,8 @@ public class MatchingEngineTransactionService {
             buyOrder.getId(),
             buyOrder.getStock().getId(),
             limitPrice(buyOrder),
-            MATCHABLE_STATUSES
+            MATCHABLE_STATUSES,
+            FIRST_MATCHABLE_ORDER
         ).stream().findFirst().orElse(null);
     }
 
@@ -268,7 +285,8 @@ public class MatchingEngineTransactionService {
             sellOrder.getId(),
             sellOrder.getStock().getId(),
             limitPrice(sellOrder),
-            MATCHABLE_STATUSES
+            MATCHABLE_STATUSES,
+            FIRST_MATCHABLE_ORDER
         ).stream().findFirst().orElse(null);
     }
 
@@ -315,13 +333,6 @@ public class MatchingEngineTransactionService {
 
     private BigDecimal limitPrice(Order order) {
         return order.getOrderPrice();
-    }
-
-    private DailyPriceRangeResponse getDailyPriceRangeIfMarketOrder(Order order) {
-        if (order.getOrderType() != OrderType.MARKET) {
-            return null;
-        }
-        return dailyPriceRangeService.getDailyPriceRange(order.getStock().getSymbol());
     }
 
     private void applyMarketOrderRemainingPrice(Order order, DailyPriceRangeResponse dailyPriceRange) {
@@ -371,8 +382,8 @@ public class MatchingEngineTransactionService {
             .order(order)
             .executionPrice(executionPrice)
             .executionQuantity(executionQuantity)
-            .commission(ZERO_MONEY)
-            .tax(ZERO_MONEY)
+            .commission(money(commissionCalculator.calculateCommission(executionPrice, executionQuantity)))
+            .tax(money(commissionCalculator.calculateTax(executionPrice, executionQuantity)))
             .build());
     }
 

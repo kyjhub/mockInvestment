@@ -17,6 +17,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -37,6 +38,11 @@ import org.hibernate.annotations.UpdateTimestamp;
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
 @Builder
 public class Order {
+
+    private static final List<OrderStatus> CANCELABLE_STATUSES = List.of(
+        OrderStatus.PENDING,
+        OrderStatus.PARTIALLY_FILLED
+    );
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -122,5 +128,13 @@ public class Order {
         if (this.remainingQuantity > 0) {
             this.orderPrice = waitingPrice;
         }
+    }
+
+    public void cancel() {
+        if (!CANCELABLE_STATUSES.contains(this.status)) {
+            throw new IllegalArgumentException("이미 종료된 주문은 취소할 수 없습니다.");
+        }
+        this.status = OrderStatus.CANCELED;
+        this.canceledAt = LocalDateTime.now();
     }
 }

@@ -3,13 +3,15 @@ package com.papertrade.paper_trading.Service;
 import com.papertrade.paper_trading.Dto.OrderExecutionResponse;
 import com.papertrade.paper_trading.Dto.OrderPlaceRequest;
 import com.papertrade.paper_trading.Dto.OrderResponse;
-import com.papertrade.paper_trading.Dto.OrderSubmittedEvent;
+import com.papertrade.paper_trading.Dto.SymbolMatchRequestedEvent;
 import com.papertrade.paper_trading.Entity.Account;
+import com.papertrade.paper_trading.Entity.Execution;
 import com.papertrade.paper_trading.Entity.Order;
 import com.papertrade.paper_trading.Entity.Stock;
 import com.papertrade.paper_trading.Entity.User;
 import com.papertrade.paper_trading.Enum.OrderType;
 import com.papertrade.paper_trading.Repository.AccountRepository;
+import com.papertrade.paper_trading.Repository.ExecutionRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository;
 import com.papertrade.paper_trading.Repository.StockRepository;
 import java.util.List;
@@ -26,7 +28,8 @@ public class OrderTradingService {
     private final AccountRepository accountRepository;
     private final StockRepository stockRepository;
     private final OrderRepository orderRepository;
-    private final OrderSubmittedStreamPublisher orderSubmittedStreamPublisher;
+    private final ExecutionRepository executionRepository;
+    private final SymbolMatchRequestedStreamPublisher symbolMatchRequestedStreamPublisher;
 
     @Transactional
     public OrderResponse placeOrder(User user, OrderPlaceRequest request) {
@@ -62,8 +65,25 @@ public class OrderTradingService {
             request.quantity()
         );
         orderRepository.saveAndFlush(order);
-        publishAfterCommit(order.getId(), stock.getSymbol());
+        publishAfterCommit(stock.getSymbol());
 
+        return toAcceptedResponse(order);
+    }
+
+    @Transactional
+    public OrderResponse cancelOrder(User user, Long orderId) {
+        if (user == null) {
+            throw new IllegalArgumentException("인증 정보가 필요합니다.");
+        }
+
+        Order order = orderRepository.findByIdForUpdate(orderId)
+            .orElseThrow(() -> new IllegalArgumentException("주문을 찾을 수 없습니다."));
+
+        if (!order.getAccount().getUser().getId().equals(user.getId())) {
+            throw new IllegalArgumentException("주문을 취소할 권한이 없습니다.");
+        }
+
+        order.cancel();
         return toAcceptedResponse(order);
     }
 
@@ -77,11 +97,13 @@ public class OrderTradingService {
         }
     }
 
-    private void publishAfterCommit(Long orderId, String symbol) {
+    private void publishAfterCommit(String symbol) {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                orderSubmittedStreamPublisher.publish(new OrderSubmittedEvent(orderId, symbol));
+                symbolMatchRequestedStreamPublisher.publish(
+                    new SymbolMatchRequestedEvent(symbol, "ORDER_SUBMITTED")
+                );
             }
         });
     }
@@ -94,6 +116,10 @@ public class OrderTradingService {
     }
 
     private OrderResponse toAcceptedResponse(Order order) {
+        List<OrderExecutionResponse> executions = executionRepository.findByOrderIdOrderByIdAsc(order.getId()).stream()
+            .map(this::toExecutionResponse)
+            .toList();
+
         return new OrderResponse(
             order.getId(),
             order.getClientOrderId(),
@@ -107,7 +133,18 @@ public class OrderTradingService {
             order.getStatus(),
             order.getSubmittedAt(),
             order.getUpdatedAt(),
-            List.<OrderExecutionResponse>of()
+            executions
+        );
+    }
+
+    private OrderExecutionResponse toExecutionResponse(Execution execution) {
+        return new OrderExecutionResponse(
+            execution.getId(),
+            execution.getExecutionPrice(),
+            execution.getExecutionQuantity(),
+            execution.getCommission(),
+            execution.getTax(),
+            execution.getExecutedAt()
         );
     }
 }
