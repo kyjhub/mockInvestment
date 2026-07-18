@@ -6,7 +6,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class OrderBookCacheProperties {
 
-    @Value("${orderbook.cache.ttl-seconds:2}")
+    @Value("${orderbook.cache.ttl-seconds:30}")
     private long ttlSeconds;
 
     @Value("${orderbook.polling.fixed-delay-ms:1000}")

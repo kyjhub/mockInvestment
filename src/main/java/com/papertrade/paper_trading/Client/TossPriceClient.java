@@ -26,6 +26,7 @@ public class TossPriceClient {
 
     private final TossInvestProperties properties;
     private final JsonMapper jsonMapper;
+    private final TossApiRateLimiter tossApiRateLimiter;
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(REQUEST_TIMEOUT)
         .build();
@@ -42,6 +43,10 @@ public class TossPriceClient {
 
         try {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            tossApiRateLimiter.recordResponseHeaders(
+                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
+                response.headers()
+            );
             return handleResponse(response);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to call Toss prices API", e);
@@ -59,11 +64,19 @@ public class TossPriceClient {
 
     private PriceResponse handleResponse(HttpResponse<String> response) {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
+            tossApiRateLimiter.recordSuccessfulResponse(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP);
             try {
                 return jsonMapper.readValue(response.body(), PriceResponse.class);
             } catch (JacksonException e) {
                 throw new IllegalStateException("Failed to parse Toss prices API response", e);
             }
+        }
+
+        if (response.statusCode() == 429) {
+            tossApiRateLimiter.recordRateLimitExceeded(
+                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
+                response.headers()
+            );
         }
 
         TossOpenApiError error = parseError(response.body());

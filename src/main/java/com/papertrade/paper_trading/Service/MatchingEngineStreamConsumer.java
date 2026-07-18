@@ -2,6 +2,7 @@ package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
+import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -83,6 +84,7 @@ public class MatchingEngineStreamConsumer {
 
     @Scheduled(fixedDelayString = "${matching-engine.polling.fixed-delay-ms:100}")
     public void consumeMatchRequests() {
+        // MapRecord<SYMBOL_MATCH_REQUESTED_STREAM_KEY, symbol, reason>
         List<MapRecord<String, Object, Object>> records = stringRedisTemplate.opsForStream().read(
             Consumer.from(CONSUMER_GROUP, consumerName),
             StreamReadOptions.empty().count(batchSize).block(Duration.ofMillis(100)),
@@ -168,6 +170,10 @@ public class MatchingEngineStreamConsumer {
 
         try {
             matchUntilOrderBookVersionIsStable(symbol);
+            acknowledge(record);
+            clearRetryCount(record);
+        } catch (TossApiQuotaUnavailableException e) {
+            log.debug("Skip matching because Toss API quota is unavailable. symbol={}", symbol);
             acknowledge(record);
             clearRetryCount(record);
         } catch (Exception e) {
