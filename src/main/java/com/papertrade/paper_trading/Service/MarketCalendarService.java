@@ -1,6 +1,8 @@
 package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Client.TossMarketCalendarClient;
+import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
+import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import com.papertrade.paper_trading.Config.MarketCalendarCacheProperties;
 import com.papertrade.paper_trading.Dto.MarketCalendarResponse;
 import java.time.Duration;
@@ -19,6 +21,7 @@ public class MarketCalendarService {
     private static final ZoneId MARKET_CALENDAR_ZONE = ZoneId.of("Asia/Seoul");
 
     private final TossMarketCalendarClient tossMarketCalendarClient;
+    private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
     private final JsonMapper jsonMapper;
     private final MarketCalendarCacheProperties cacheProperties;
@@ -30,6 +33,10 @@ public class MarketCalendarService {
         MarketCalendarResponse cachedResponse = getCachedMarketCalendar(cacheKey);
         if (cachedResponse != null) {
             return cachedResponse;
+        }
+
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP)) {
+            throw new TossApiQuotaUnavailableException("일시적으로 장 운영정보를 가져올 수 없습니다.");
         }
 
         MarketCalendarResponse response = tossMarketCalendarClient.getUsMarketCalendar(cacheDate);

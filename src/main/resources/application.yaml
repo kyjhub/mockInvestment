@@ -16,6 +16,13 @@ toss-invest:
   openapi:
     base-url: https://openapi.tossinvest.com
     secret-token: ${TOSS_INVEST_SECRET_TOKEN:}
+  rate-limit:
+    orderbook-price-candle:
+      default-limit: ${TOSS_RATE_LIMIT_GROUP_A_DEFAULT:5}
+      safety-margin: ${TOSS_RATE_LIMIT_GROUP_A_MARGIN:0.8}
+    market-calendar-exchange-rate:
+      default-limit: ${TOSS_RATE_LIMIT_GROUP_B_DEFAULT:5}
+      safety-margin: ${TOSS_RATE_LIMIT_GROUP_B_MARGIN:0.8}
 
 market-calendar:
   cache:
@@ -23,7 +30,7 @@ market-calendar:
 
 orderbook:
   cache:
-    ttl-seconds: ${ORDERBOOK_CACHE_TTL_SECONDS:2}
+    ttl-seconds: ${ORDERBOOK_CACHE_TTL_SECONDS:30}
   polling:
     fixed-delay-ms: ${ORDERBOOK_POLLING_FIXED_DELAY_MS:1000}
     lock-ttl-ms: ${ORDERBOOK_POLLING_LOCK_TTL_MS:900}

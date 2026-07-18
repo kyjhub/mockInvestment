@@ -1,6 +1,8 @@
 package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Client.TossPriceClient;
+import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
+import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import com.papertrade.paper_trading.Config.PriceCacheProperties;
 import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.PricePubSubMessage;
@@ -28,6 +30,7 @@ public class PriceService {
     private static final String LOCK_VALUE = "1";
 
     private final TossPriceClient tossPriceClient;
+    private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
     private final JsonMapper jsonMapper;
     private final PriceCacheProperties cacheProperties;
@@ -77,11 +80,18 @@ public class PriceService {
 
         for (int fromIndex = 0; fromIndex < pollingSymbols.size(); fromIndex += MAX_SYMBOL_COUNT) {
             int toIndex = Math.min(fromIndex + MAX_SYMBOL_COUNT, pollingSymbols.size());
-            fetchCacheAndPublish(pollingSymbols.subList(fromIndex, toIndex));
+            try {
+                fetchCacheAndPublish(pollingSymbols.subList(fromIndex, toIndex));
+            } catch (TossApiQuotaUnavailableException ignored) {
+                return;
+            }
         }
     }
 
     private PriceResponse fetchCacheAndPublish(List<String> symbols) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
+            throw new TossApiQuotaUnavailableException("일시적으로 현재가를 가져올 수 없습니다.");
+        }
         PriceResponse response = tossPriceClient.getPrices(symbols);
         for (PriceResult price : results(response)) {
             cachePrice(price);

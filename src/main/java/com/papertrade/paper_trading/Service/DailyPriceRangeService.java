@@ -1,6 +1,8 @@
 package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Client.TossCandleClient;
+import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
+import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import com.papertrade.paper_trading.Config.DailyPriceRangeCacheProperties;
 import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.Candle;
@@ -26,6 +28,7 @@ public class DailyPriceRangeService {
     private static final String LOCK_VALUE = "1";
 
     private final TossCandleClient tossCandleClient;
+    private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
     private final JsonMapper jsonMapper;
     private final DailyPriceRangeCacheProperties cacheProperties;
@@ -45,7 +48,10 @@ public class DailyPriceRangeService {
         for (String symbol : symbols) {
             validateSymbol(symbol);
             if (tryAcquirePollingLock(symbol)) {
-                fetchCacheAndPublish(symbol);
+                try {
+                    fetchCacheAndPublish(symbol);
+                } catch (TossApiQuotaUnavailableException ignored) {
+                }
             }
         }
     }
@@ -82,6 +88,9 @@ public class DailyPriceRangeService {
     }
 
     private DailyPriceRangeResponse fetchCacheAndPublish(String symbol) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
+            throw new TossApiQuotaUnavailableException("일시적으로 일봉 데이터를 가져올 수 없습니다.");
+        }
         DailyPriceRangeResponse response = toDailyPriceRange(symbol, tossCandleClient.getLatestDailyCandle(symbol));
         cacheDailyPriceRange(response);
         publishDailyPriceRange(response);

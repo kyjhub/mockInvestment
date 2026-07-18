@@ -26,6 +26,7 @@ public class TossMarketCalendarClient {
 
     private final TossInvestProperties properties;
     private final JsonMapper jsonMapper;
+    private final TossApiRateLimiter tossApiRateLimiter;
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(REQUEST_TIMEOUT)
         .build();
@@ -42,6 +43,10 @@ public class TossMarketCalendarClient {
 
         try {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            tossApiRateLimiter.recordResponseHeaders(
+                TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP,
+                response.headers()
+            );
             return handleResponse(response);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to call Toss market calendar API", e);
@@ -63,11 +68,21 @@ public class TossMarketCalendarClient {
 
     private MarketCalendarResponse handleResponse(HttpResponse<String> response) {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
+            tossApiRateLimiter.recordSuccessfulResponse(
+                TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP
+            );
             try {
                 return jsonMapper.readValue(response.body(), MarketCalendarResponse.class);
             } catch (JacksonException e) {
                 throw new IllegalStateException("Failed to parse Toss market calendar API response", e);
             }
+        }
+
+        if (response.statusCode() == 429) {
+            tossApiRateLimiter.recordRateLimitExceeded(
+                TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP,
+                response.headers()
+            );
         }
 
         TossOpenApiError error = parseError(response.body());

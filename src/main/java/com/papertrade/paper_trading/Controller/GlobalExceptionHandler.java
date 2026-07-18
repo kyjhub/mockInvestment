@@ -1,6 +1,7 @@
 package com.papertrade.paper_trading.Controller;
 
 import com.papertrade.paper_trading.Client.TossOpenApiException;
+import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import jakarta.validation.ConstraintViolationException;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -58,6 +59,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity
             .status(HttpStatusCode.valueOf(exception.statusCode()))
             .body(body);
+    }
+
+    @ExceptionHandler(TossApiQuotaUnavailableException.class)
+    public ResponseEntity<Map<String, String>> handleTossApiQuotaUnavailableException(
+        TossApiQuotaUnavailableException exception
+    ) {
+        return ResponseEntity
+            .status(HttpStatus.SERVICE_UNAVAILABLE)
+            .body(Map.of("message", exception.getMessage()));
     }
 
     @ExceptionHandler(Exception.class)

@@ -1,6 +1,8 @@
 package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Client.TossOrderBookClient;
+import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
+import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import com.papertrade.paper_trading.Config.OrderBookCacheProperties;
 import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.OrderBookPubSubMessage;
@@ -23,6 +25,7 @@ public class OrderBookService {
     private static final String LOCK_VALUE = "1";
 
     private final TossOrderBookClient tossOrderBookClient;
+    private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
     private final JsonMapper jsonMapper;
     private final OrderBookCacheProperties cacheProperties;
@@ -42,10 +45,16 @@ public class OrderBookService {
             return;
         }
 
-        fetchCacheAndPublish(symbol);
+        try {
+            fetchCacheAndPublish(symbol);
+        } catch (TossApiQuotaUnavailableException ignored) {
+        }
     }
 
     private OrderBookResponse fetchCacheAndPublish(String symbol) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
+            throw new TossApiQuotaUnavailableException("일시적으로 호가를 가져올 수 없습니다.");
+        }
         OrderBookResponse previousResponse = getCachedOrderBook(symbol);
         OrderBookResponse response = tossOrderBookClient.getOrderBook(symbol);
         cacheOrderBook(symbol, response);
