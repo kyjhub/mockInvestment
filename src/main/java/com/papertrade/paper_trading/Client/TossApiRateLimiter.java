@@ -69,6 +69,17 @@ public class TossApiRateLimiter {
         }
     }
 
+    public long secondsUntilAvailable(String group) {
+        try {
+            Long coolingDownRemainingMillis = coolingDownRemainingMillis(group);
+            if (coolingDownRemainingMillis != null) {
+                return Math.max(1L, (long) Math.ceil(coolingDownRemainingMillis / 1_000.0));
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return QUOTA_TTL.toSeconds();
+    }
+
     public void recordResponseHeaders(String group, HttpHeaders headers) {
         headers.firstValue("X-RateLimit-Limit").ifPresent(value -> {
             try {
@@ -133,14 +144,19 @@ public class TossApiRateLimiter {
 
     // 현재 토스증권 api에 요청을 해도 되는지 여부
     private boolean isCoolingDown(String group) {
+        return coolingDownRemainingMillis(group) != null;
+    }
+
+    private Long coolingDownRemainingMillis(String group) {
         String value = stringRedisTemplate.opsForValue().get(NEXT_ALLOWED_AT_KEY_PREFIX + group);
         if (value == null) {
-            return false;
+            return null;
         }
         try {
-            return Long.parseLong(value) > System.currentTimeMillis();
+            long remaining = Long.parseLong(value) - System.currentTimeMillis();
+            return remaining > 0 ? remaining : null;
         } catch (NumberFormatException ignored) {
-            return false;
+            return null;
         }
     }
 

@@ -53,7 +53,11 @@ public class OrderBookService {
 
     private OrderBookResponse fetchCacheAndPublish(String symbol) {
         if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
-            throw new TossApiQuotaUnavailableException("일시적으로 호가를 가져올 수 없습니다.");
+            throw new TossApiQuotaUnavailableException(
+                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP),
+                "일시적으로 호가를 가져올 수 없습니다."
+            );
         }
         OrderBookResponse previousResponse = getCachedOrderBook(symbol);
         OrderBookResponse response = tossOrderBookClient.getOrderBook(symbol);
