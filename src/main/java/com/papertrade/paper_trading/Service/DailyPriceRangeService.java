@@ -89,7 +89,11 @@ public class DailyPriceRangeService {
 
     private DailyPriceRangeResponse fetchCacheAndPublish(String symbol) {
         if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
-            throw new TossApiQuotaUnavailableException("일시적으로 일봉 데이터를 가져올 수 없습니다.");
+            throw new TossApiQuotaUnavailableException(
+                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP),
+                "일시적으로 일봉 데이터를 가져올 수 없습니다."
+            );
         }
         DailyPriceRangeResponse response = toDailyPriceRange(symbol, tossCandleClient.getLatestDailyCandle(symbol));
         cacheDailyPriceRange(response);

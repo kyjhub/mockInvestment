@@ -2,11 +2,13 @@ package com.papertrade.paper_trading.Controller;
 
 import com.papertrade.paper_trading.Client.TossOpenApiException;
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
+import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import jakarta.validation.ConstraintViolationException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
@@ -65,9 +67,19 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, String>> handleTossApiQuotaUnavailableException(
         TossApiQuotaUnavailableException exception
     ) {
+        boolean pendingResponse = TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP.equals(exception.group());
+        HttpStatus status = pendingResponse ? HttpStatus.ACCEPTED : HttpStatus.SERVICE_UNAVAILABLE;
+        Map<String, String> body = pendingResponse
+            ? Map.of(
+                "status", "pending",
+                "message", "잠시 후 실시간 갱신으로 반영됩니다."
+            )
+            : Map.of("message", exception.getMessage());
+
         return ResponseEntity
-            .status(HttpStatus.SERVICE_UNAVAILABLE)
-            .body(Map.of("message", exception.getMessage()));
+            .status(status)
+            .header(HttpHeaders.RETRY_AFTER, Long.toString(exception.retryAfterSeconds()))
+            .body(body);
     }
 
     @ExceptionHandler(Exception.class)

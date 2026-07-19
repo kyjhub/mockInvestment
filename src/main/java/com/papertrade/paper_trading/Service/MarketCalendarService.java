@@ -36,7 +36,11 @@ public class MarketCalendarService {
         }
 
         if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP)) {
-            throw new TossApiQuotaUnavailableException("일시적으로 장 운영정보를 가져올 수 없습니다.");
+            throw new TossApiQuotaUnavailableException(
+                TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP),
+                "일시적으로 장 운영정보를 가져올 수 없습니다."
+            );
         }
 
         MarketCalendarResponse response = tossMarketCalendarClient.getUsMarketCalendar(cacheDate);
