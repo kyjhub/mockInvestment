@@ -1,7 +1,6 @@
 package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
-import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
@@ -188,9 +187,8 @@ public class MatchingEngineStreamConsumer {
         long versionAfterMatching;
         do {
             versionBeforeMatching = orderBookService.getOrderBookVersion(symbol);
-            OrderBookResponse orderBook = orderBookService.getOrderBook(symbol);
             DailyPriceRangeResponse dailyPriceRange = dailyPriceRangeService.getDailyPriceRange(symbol);
-            matchingEngineTransactionService.matchSymbol(symbol, orderBook, dailyPriceRange);
+            matchingEngineTransactionService.matchSymbol(symbol, dailyPriceRange);
             versionAfterMatching = orderBookService.getOrderBookVersion(symbol);
         } while (versionAfterMatching != versionBeforeMatching);
     }

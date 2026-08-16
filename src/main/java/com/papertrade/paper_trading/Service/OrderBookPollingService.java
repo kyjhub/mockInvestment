@@ -27,30 +27,39 @@ public class OrderBookPollingService {
     private final OrderRepository orderRepository;
     private final StockRepository stockRepository;
     private int pendingRotationOffset;
-    private int subscriptionRotationOffset;
+    private int idleSubscriptionRotationOffset;
 
     @Scheduled(fixedDelayString = "${orderbook.polling.fixed-delay-ms:1000}")
-    public void pollActiveOrderBooks() {
+    public void pollPendingOrderSymbols() {
+        List<String> pendingSymbols = collectPendingOrderSymbols();
+        pendingSymbols = rotate(pendingSymbols, pendingRotationOffset++);
+
+        for (String symbol : pendingSymbols) {
+            orderBookService.refreshAndPublish(symbol);
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${orderbook.polling.idle-fixed-delay-ms:20000}")
+    public void pollIdleSubscriptionSymbols() {
+        Set<String> pendingSymbolSet = new HashSet<>(collectPendingOrderSymbols());
+        List<String> idleSubscriptionSymbols = subscriptionRegistry.activeSymbols().stream()
+            .filter(symbol -> !pendingSymbolSet.contains(symbol))
+            .sorted()
+            .toList();
+        idleSubscriptionSymbols = rotate(idleSubscriptionSymbols, idleSubscriptionRotationOffset++);
+
+        for (String symbol : idleSubscriptionSymbols) {
+            orderBookService.refreshAndPublish(symbol);
+        }
+    }
+
+    private List<String> collectPendingOrderSymbols() {
         List<String> pendingSymbols = new ArrayList<>();
         for (Long stockId : orderRepository.findDistinctStockIdsByStatusIn(MATCHABLE_STATUSES)) {
             stockRepository.findById(stockId).ifPresent(stock -> pendingSymbols.add(stock.getSymbol()));
         }
         Collections.sort(pendingSymbols);
-        pendingSymbols = rotate(pendingSymbols, pendingRotationOffset++);
-
-        Set<String> pendingSymbolSet = new HashSet<>(pendingSymbols);
-        List<String> subscriptionSymbols = subscriptionRegistry.activeSymbols().stream()
-            .filter(symbol -> !pendingSymbolSet.contains(symbol))
-            .sorted()
-            .toList();
-        subscriptionSymbols = rotate(subscriptionSymbols, subscriptionRotationOffset++);
-
-        for (String symbol : pendingSymbols) {
-            orderBookService.refreshAndPublish(symbol);
-        }
-        for (String symbol : subscriptionSymbols) {
-            orderBookService.refreshAndPublish(symbol);
-        }
+        return pendingSymbols;
     }
 
     private List<String> rotate(List<String> symbols, int offset) {

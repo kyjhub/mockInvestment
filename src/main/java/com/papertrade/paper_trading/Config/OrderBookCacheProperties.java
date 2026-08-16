@@ -12,6 +12,9 @@ public class OrderBookCacheProperties {
     @Value("${orderbook.polling.fixed-delay-ms:1000}")
     private long pollingFixedDelayMs;
 
+    @Value("${orderbook.polling.idle-fixed-delay-ms:20000}")
+    private long idlePollingFixedDelayMs;
+
     @Value("${orderbook.polling.lock-ttl-ms:900}")
     private long pollingLockTtlMs;
 
@@ -21,6 +24,10 @@ public class OrderBookCacheProperties {
 
     public long pollingFixedDelayMs() {
         return pollingFixedDelayMs;
+    }
+
+    public long idlePollingFixedDelayMs() {
+        return idlePollingFixedDelayMs;
     }
 
     public long pollingLockTtlMs() {

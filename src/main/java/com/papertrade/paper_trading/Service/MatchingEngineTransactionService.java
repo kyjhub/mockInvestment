@@ -17,6 +17,7 @@ import com.papertrade.paper_trading.Repository.CashTransactionRepository;
 import com.papertrade.paper_trading.Repository.ExecutionRepository;
 import com.papertrade.paper_trading.Repository.HoldingRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository;
+import com.papertrade.paper_trading.Repository.OrderRepository.MatchableOrder;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Comparator;
@@ -46,17 +47,17 @@ public class MatchingEngineTransactionService {
     private final HoldingRepository holdingRepository;
     private final CashTransactionRepository cashTransactionRepository;
     private final DailyPriceRangeService dailyPriceRangeService;
+    private final OrderBookService orderBookService;
     private final CommissionCalculator commissionCalculator;
     private final PlatformTransactionManager transactionManager;
 
-    public void matchSymbol(
-        String symbol,
-        OrderBookResponse orderBook,
-        DailyPriceRangeResponse dailyPriceRange
-    ) {
-        List<Long> orderIds = orderRepository.findMatchableIdsBySymbol(symbol, MATCHABLE_STATUSES);
+    public void matchSymbol(String symbol, DailyPriceRangeResponse dailyPriceRange) {
+        List<MatchableOrder> matchableOrders = orderRepository.findMatchableOrdersBySymbol(symbol, MATCHABLE_STATUSES);
         TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
-        for (Long orderId : orderIds) {
+        for (MatchableOrder matchableOrder : matchableOrders) {
+            // Toss 호출은 주문의 pessimistic lock을 잡기 전, transaction 밖에서 수행한다.
+            OrderBookResponse orderBook = orderBookService.getOrderBookNoOlderThan(symbol, matchableOrder.submittedAt());
+            Long orderId = matchableOrder.id();
             transactionTemplate.executeWithoutResult(ignored -> matchOrder(orderId, orderBook, dailyPriceRange));
         }
     }
