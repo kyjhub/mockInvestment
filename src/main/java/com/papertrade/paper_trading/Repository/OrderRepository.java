@@ -4,6 +4,7 @@ import com.papertrade.paper_trading.Entity.Order;
 import com.papertrade.paper_trading.Enum.OrderStatus;
 import jakarta.persistence.LockModeType;
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -65,7 +66,8 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     List<Long> findDistinctStockIdsByStatusIn(@Param("statuses") Collection<OrderStatus> statuses);
 
     @Query("""
-        select o.id from Order o
+        select new com.papertrade.paper_trading.Repository.MatchableOrder(o.id, o.submittedAt)
+        from Order o
         where o.stock.symbol = :symbol
           and o.status in :statuses
           and o.remainingQuantity > 0
@@ -76,9 +78,12 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
           o.submittedAt asc,
           o.remainingQuantity desc
         """)
-    List<Long> findMatchableIdsBySymbol(
+    List<MatchableOrder> findMatchableOrdersBySymbol(
         @Param("symbol") String symbol,
         @Param("statuses") Collection<OrderStatus> statuses
     );
+
+    record MatchableOrder(Long id, LocalDateTime submittedAt) {
+    }
 
 }

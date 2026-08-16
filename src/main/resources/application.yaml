@@ -33,6 +33,7 @@ orderbook:
     ttl-seconds: ${ORDERBOOK_CACHE_TTL_SECONDS:30}
   polling:
     fixed-delay-ms: ${ORDERBOOK_POLLING_FIXED_DELAY_MS:1000}
+    idle-fixed-delay-ms: ${ORDERBOOK_POLLING_IDLE_FIXED_DELAY_MS:20000}
     lock-ttl-ms: ${ORDERBOOK_POLLING_LOCK_TTL_MS:900}
 
 matching-engine:

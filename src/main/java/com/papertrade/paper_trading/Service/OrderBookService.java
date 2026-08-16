@@ -9,6 +9,7 @@ import com.papertrade.paper_trading.Dto.OrderBookPubSubMessage;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.SymbolMatchRequestedEvent;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.Objects;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -40,6 +41,17 @@ public class OrderBookService {
         return fetchCacheAndPublish(symbol);
     }
 
+    public OrderBookResponse getOrderBookNoOlderThan(String symbol, LocalDateTime notBefore) {
+        OrderBookResponse cachedResponse = getCachedOrderBook(symbol);
+        if (cachedResponse != null
+            && cachedResponse.receivedAt() != null
+            && !cachedResponse.receivedAt().isBefore(notBefore)) {
+            return cachedResponse;
+        }
+
+        return fetchCacheAndPublish(symbol);
+    }
+
     public void refreshAndPublish(String symbol) {
         if (!tryAcquirePollingLock(symbol)) {
             return;
@@ -60,7 +72,8 @@ public class OrderBookService {
             );
         }
         OrderBookResponse previousResponse = getCachedOrderBook(symbol);
-        OrderBookResponse response = tossOrderBookClient.getOrderBook(symbol);
+        OrderBookResponse rawResponse = tossOrderBookClient.getOrderBook(symbol);
+        OrderBookResponse response = new OrderBookResponse(rawResponse.result(), LocalDateTime.now());
         cacheOrderBook(symbol, response);
         if (orderBookChanged(previousResponse, response)) {
             incrementOrderBookVersion(symbol);
