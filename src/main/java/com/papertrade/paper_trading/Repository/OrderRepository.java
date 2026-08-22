@@ -66,7 +66,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     List<Long> findDistinctStockIdsByStatusIn(@Param("statuses") Collection<OrderStatus> statuses);
 
     @Query("""
-        select new com.papertrade.paper_trading.Repository.MatchableOrder(o.id, o.submittedAt)
+        select new com.papertrade.paper_trading.Repository.OrderRepository$MatchableOrder(o.id, o.submittedAt)
         from Order o
         where o.stock.symbol = :symbol
           and o.status in :statuses

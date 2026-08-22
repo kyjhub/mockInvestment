@@ -1,5 +1,7 @@
 package com.papertrade.paper_trading.Client;
 
+import com.fasterxml.jackson.core.JacksonException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.papertrade.paper_trading.Config.TossInvestProperties;
 import com.papertrade.paper_trading.Dto.PriceResponse;
 import com.papertrade.paper_trading.Dto.TossOpenApiError;
@@ -15,8 +17,6 @@ import java.time.Duration;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.json.JsonMapper;
 
 @Component
 @RequiredArgsConstructor
@@ -25,7 +25,7 @@ public class TossPriceClient {
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
     private final TossInvestProperties properties;
-    private final JsonMapper jsonMapper;
+    private final ObjectMapper objectMapper;
     private final TossApiRateLimiter tossApiRateLimiter;
     private final HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(REQUEST_TIMEOUT)
@@ -66,7 +66,7 @@ public class TossPriceClient {
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
             tossApiRateLimiter.recordSuccessfulResponse(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP);
             try {
-                return jsonMapper.readValue(response.body(), PriceResponse.class);
+                return objectMapper.readValue(response.body(), PriceResponse.class);
             } catch (JacksonException e) {
                 throw new IllegalStateException("Failed to parse Toss prices API response", e);
             }
@@ -90,7 +90,7 @@ public class TossPriceClient {
 
     private TossOpenApiError parseError(String responseBody) {
         try {
-            TossOpenApiErrorResponse response = jsonMapper.readValue(responseBody, TossOpenApiErrorResponse.class);
+            TossOpenApiErrorResponse response = objectMapper.readValue(responseBody, TossOpenApiErrorResponse.class);
             if (response.error() != null) {
                 return response.error();
             }

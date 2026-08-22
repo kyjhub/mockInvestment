@@ -1,17 +1,18 @@
 package com.papertrade.paper_trading.Service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.papertrade.paper_trading.Client.TossMarketCalendarClient;
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import com.papertrade.paper_trading.Config.MarketCalendarCacheProperties;
 import com.papertrade.paper_trading.Dto.MarketCalendarResponse;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import tools.jackson.databind.json.JsonMapper;
 
 @Service
 @RequiredArgsConstructor
@@ -23,7 +24,7 @@ public class MarketCalendarService {
     private final TossMarketCalendarClient tossMarketCalendarClient;
     private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
-    private final JsonMapper jsonMapper;
+    private final ObjectMapper objectMapper;
     private final MarketCalendarCacheProperties cacheProperties;
 
     public MarketCalendarResponse getUsMarketCalendar(LocalDate date) {
@@ -54,21 +55,21 @@ public class MarketCalendarService {
             if (cachedValue == null || cachedValue.isBlank()) {
                 return null;
             }
-            return jsonMapper.readValue(cachedValue, MarketCalendarResponse.class);
-        } catch (RuntimeException ignored) {
+            return objectMapper.readValue(cachedValue, MarketCalendarResponse.class);
+        } catch (IOException | RuntimeException ignored) {
             return null;
         }
     }
 
     private void cacheMarketCalendar(String cacheKey, MarketCalendarResponse response) {
         try {
-            String value = jsonMapper.writeValueAsString(response);
+            String value = objectMapper.writeValueAsString(response);
             stringRedisTemplate.opsForValue().set(
                 cacheKey,
                 value,
                 Duration.ofHours(cacheProperties.ttlHours())
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 }
