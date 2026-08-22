@@ -1,5 +1,6 @@
 package com.papertrade.paper_trading.Service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.papertrade.paper_trading.Client.TossOrderBookClient;
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import com.papertrade.paper_trading.Client.TossApiRateLimiter;
@@ -8,13 +9,13 @@ import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.OrderBookPubSubMessage;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.SymbolMatchRequestedEvent;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Objects;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import tools.jackson.databind.json.JsonMapper;
 
 @Service
 @RequiredArgsConstructor
@@ -28,7 +29,7 @@ public class OrderBookService {
     private final TossOrderBookClient tossOrderBookClient;
     private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
-    private final JsonMapper jsonMapper;
+    private final ObjectMapper objectMapper;
     private final OrderBookCacheProperties cacheProperties;
     private final SymbolMatchRequestedStreamPublisher symbolMatchRequestedStreamPublisher;
 
@@ -100,8 +101,8 @@ public class OrderBookService {
             if (cachedValue == null || cachedValue.isBlank()) {
                 return null;
             }
-            return jsonMapper.readValue(cachedValue, OrderBookResponse.class);
-        } catch (RuntimeException ignored) {
+            return objectMapper.readValue(cachedValue, OrderBookResponse.class);
+        } catch (IOException | RuntimeException ignored) {
             return null;
         }
     }
@@ -110,10 +111,10 @@ public class OrderBookService {
         try {
             stringRedisTemplate.opsForValue().set(
                 cacheKey(symbol),
-                jsonMapper.writeValueAsString(response),
+                objectMapper.writeValueAsString(response),
                 Duration.ofSeconds(cacheProperties.ttlSeconds())
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 
@@ -122,9 +123,9 @@ public class OrderBookService {
             OrderBookPubSubMessage message = new OrderBookPubSubMessage(symbol, response);
             stringRedisTemplate.convertAndSend(
                 RedisPubSubConfig.ORDER_BOOK_UPDATES_CHANNEL,
-                jsonMapper.writeValueAsString(message)
+                objectMapper.writeValueAsString(message)
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 

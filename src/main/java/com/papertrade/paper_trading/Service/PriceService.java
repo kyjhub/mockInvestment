@@ -1,5 +1,6 @@
 package com.papertrade.paper_trading.Service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.papertrade.paper_trading.Client.TossPriceClient;
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import com.papertrade.paper_trading.Client.TossApiRateLimiter;
@@ -8,6 +9,7 @@ import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.PricePubSubMessage;
 import com.papertrade.paper_trading.Dto.PriceResponse;
 import com.papertrade.paper_trading.Dto.PriceResult;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,7 +19,6 @@ import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import tools.jackson.databind.json.JsonMapper;
 
 @Service
 @RequiredArgsConstructor
@@ -32,7 +33,7 @@ public class PriceService {
     private final TossPriceClient tossPriceClient;
     private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
-    private final JsonMapper jsonMapper;
+    private final ObjectMapper objectMapper;
     private final PriceCacheProperties cacheProperties;
 
     public PriceResponse getPrices(List<String> symbols) {
@@ -117,8 +118,8 @@ public class PriceService {
             if (cachedValue == null || cachedValue.isBlank()) {
                 return null;
             }
-            return jsonMapper.readValue(cachedValue, PriceResult.class);
-        } catch (RuntimeException ignored) {
+            return objectMapper.readValue(cachedValue, PriceResult.class);
+        } catch (IOException | RuntimeException ignored) {
             return null;
         }
     }
@@ -127,10 +128,10 @@ public class PriceService {
         try {
             stringRedisTemplate.opsForValue().set(
                 cacheKey(price.symbol()),
-                jsonMapper.writeValueAsString(price),
+                objectMapper.writeValueAsString(price),
                 Duration.ofSeconds(cacheProperties.ttlSeconds())
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 
@@ -139,9 +140,9 @@ public class PriceService {
             PricePubSubMessage message = new PricePubSubMessage(price.symbol(), price);
             stringRedisTemplate.convertAndSend(
                 RedisPubSubConfig.PRICE_UPDATES_CHANNEL,
-                jsonMapper.writeValueAsString(message)
+                objectMapper.writeValueAsString(message)
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 

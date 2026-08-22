@@ -13,7 +13,7 @@
 
 | 영역 | 사용 기술 | 현재 역할 |
 | --- | --- | --- |
-| 애플리케이션 | Java 25, Spring Boot 4.1 | 단일 Spring Boot 애플리케이션 |
+| 애플리케이션 | Java 21, Spring Boot 3.5 | 단일 Spring Boot 애플리케이션 |
 | HTTP API | Spring Web MVC | 인증, 시세 조회, 주문 접수 및 취소 API |
 | 인증/인가 | Spring Security, JWT, BCrypt | Stateless 인증과 사용자 상태 확인 |
 | 영속성 | Spring Data JPA, PostgreSQL | 사용자, 계좌, 주문, 체결, 보유량, 현금 원장 저장 |
@@ -22,7 +22,7 @@
 | 서버 간 실시간 전파 | Redis Pub/Sub | 여러 애플리케이션 인스턴스 간 시세 갱신 팬아웃 |
 | 클라이언트 실시간 전파 | STOMP WebSocket | 종목별 호가, 현재가, 일일 고저가 전송 |
 | 외부 시세 | Toss Securities Open API | 장 운영정보, 호가, 현재가, 일봉 조회 |
-| 직렬화 | Jackson 3 `JsonMapper` | Toss 응답 및 Redis 캐시/Pub/Sub 메시지 처리 |
+| 직렬화 | Jackson 2 `ObjectMapper` | Toss 응답 및 Redis 캐시/Pub/Sub 메시지 처리 |
 | 보조 코드 | Lombok | 생성자, Getter, Builder 생성 |
 
 애플리케이션 시작 클래스에는 `@SpringBootApplication`과 `@EnableScheduling`이 선언되어 있다. 따라서 컴포넌트 스캔과 함께 시세 폴링, 매칭 Stream 소비, 미체결 주문 안전망 같은 스케줄 작업이 활성화된다.
@@ -794,11 +794,13 @@ Redis cache, Pub/Sub, WebSocket subscriber 처리의 일부 오류는 실시간 
 
 ### 17.2 현재 컴파일 상태
 
-2026-08-16 기준 `./gradlew compileJava`는 성공한다. 과거 `OrderBookPollingService.java`에 있던 effectively-final 컴파일 에러는 폴링 메서드를 두 그룹(§7.4)으로 분리하면서 함께 해결됐다.
+2026-08-23 기준 `./gradlew compileJava`는 성공한다. 과거 `OrderBookPollingService.java`에 있던 effectively-final 컴파일 에러는 폴링 메서드를 두 그룹(§7.4)으로 분리하면서 함께 해결됐다.
 
-`./gradlew test`는 4건 중 3건(`SymbolSubscriptionRegistryTests`)이 통과한다. `PaperTradingApplicationTests.contextLoads()` 1건은 로컬 환경에 PostgreSQL datasource가 설정되어 있지 않아 실패하며, 이는 §19.6에 정리된 기존 환경 구성 문제이지 코드 결함은 아니다.
+`./gradlew test`는 4건 중 3건(`SymbolSubscriptionRegistryTests`)이 통과한다. `PaperTradingApplicationTests.contextLoads()` 1건은 로컬 환경에 PostgreSQL datasource가 설정되어 있지 않아 실패하며, 이는 §19.6에 정리된 기존 환경 구성 문제이지 코드 결함은 아니다. datasource와 Redis를 제공하면 4건 모두 통과하는 것을 확인했다.
 
-컴파일러는 여전히 `MatchingEngineStreamConsumer`의 deprecated API 사용과 unchecked operation을 경고한다.
+`OrderRepository.findMatchableOrdersBySymbol()`의 JPQL constructor expression은 중첩 record를 `com.papertrade.paper_trading.Repository.MatchableOrder`로 참조하고 있어 Hibernate가 클래스를 해석하지 못했고, datasource가 연결되면 repository bean 생성 단계에서 application context 기동이 실패했다. 바깥 클래스를 포함한 `...Repository.OrderRepository$MatchableOrder`로 수정했다.
+
+컴파일러는 여전히 `MatchingEngineStreamConsumer`의 unchecked operation을 경고한다.
 
 ## 18. 현재 구현 경계
 

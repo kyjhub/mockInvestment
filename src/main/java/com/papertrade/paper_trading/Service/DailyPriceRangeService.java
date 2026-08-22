@@ -1,5 +1,6 @@
 package com.papertrade.paper_trading.Service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.papertrade.paper_trading.Client.TossCandleClient;
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import com.papertrade.paper_trading.Client.TossApiRateLimiter;
@@ -9,6 +10,7 @@ import com.papertrade.paper_trading.Dto.Candle;
 import com.papertrade.paper_trading.Dto.CandleResponse;
 import com.papertrade.paper_trading.Dto.DailyPriceRangePubSubMessage;
 import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
@@ -16,7 +18,6 @@ import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import tools.jackson.databind.json.JsonMapper;
 
 @Service
 @RequiredArgsConstructor
@@ -30,7 +31,7 @@ public class DailyPriceRangeService {
     private final TossCandleClient tossCandleClient;
     private final TossApiRateLimiter tossApiRateLimiter;
     private final StringRedisTemplate stringRedisTemplate;
-    private final JsonMapper jsonMapper;
+    private final ObjectMapper objectMapper;
     private final DailyPriceRangeCacheProperties cacheProperties;
 
     public DailyPriceRangeResponse getDailyPriceRange(String symbol) {
@@ -128,8 +129,8 @@ public class DailyPriceRangeService {
             if (cachedValue == null || cachedValue.isBlank()) {
                 return null;
             }
-            return jsonMapper.readValue(cachedValue, DailyPriceRangeResponse.class);
-        } catch (RuntimeException ignored) {
+            return objectMapper.readValue(cachedValue, DailyPriceRangeResponse.class);
+        } catch (IOException | RuntimeException ignored) {
             return null;
         }
     }
@@ -138,10 +139,10 @@ public class DailyPriceRangeService {
         try {
             stringRedisTemplate.opsForValue().set(
                 cacheKey(response.symbol()),
-                jsonMapper.writeValueAsString(response),
+                objectMapper.writeValueAsString(response),
                 Duration.ofSeconds(cacheProperties.ttlSeconds())
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 
@@ -150,9 +151,9 @@ public class DailyPriceRangeService {
             DailyPriceRangePubSubMessage message = new DailyPriceRangePubSubMessage(response.symbol(), response);
             stringRedisTemplate.convertAndSend(
                 RedisPubSubConfig.DAILY_PRICE_RANGE_UPDATES_CHANNEL,
-                jsonMapper.writeValueAsString(message)
+                objectMapper.writeValueAsString(message)
             );
-        } catch (RuntimeException ignored) {
+        } catch (IOException | RuntimeException ignored) {
         }
     }
 
