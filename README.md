@@ -250,7 +250,3 @@ src/main/java/com/papertrade/paper_trading/
 ## 문서
 
 - [`docs/current-implementation-overview.md`](docs/current-implementation-overview.md) — 코드 기준 구현 현황, 데이터 흐름, 설정, 구현 경계와 주의점
-
-## 라이선스
-
-[MIT](LICENSE)
