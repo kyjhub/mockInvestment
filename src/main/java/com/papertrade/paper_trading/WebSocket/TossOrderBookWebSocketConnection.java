@@ -325,6 +325,10 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
         declaredSymbols = List.of();
     }
 
+    public Set<String> rejectedSymbols() {
+        return Set.copyOf(rejectedSymbols);
+    }
+
     public List<String> declaredSymbols() {
         return Collections.unmodifiableList(declaredSymbols);
     }

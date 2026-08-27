@@ -1,7 +1,5 @@
 package com.papertrade.paper_trading.Service;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
-import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -35,12 +33,11 @@ public class MatchingEngineStreamConsumer {
     private static final String CONSUMER_GROUP = "matching-engine";
     private static final String RETRY_COUNT_HASH_KEY = "symbols:match-requested:retry-counts";
     private static final String DLQ_STREAM_KEY = "symbols:match-requested:dlq";
+    private static final String ORDER_BOOK_UPDATED_REASON = "ORDER_BOOK_UPDATED";
 
     private final StringRedisTemplate stringRedisTemplate;
-    private final MatchingEngineTransactionService matchingEngineTransactionService;
-    private final SymbolOrderLockService symbolOrderLockService;
-    private final OrderBookService orderBookService;
-    private final DailyPriceRangeService dailyPriceRangeService;
+    private final SymbolMatchingProcessor symbolMatchingProcessor;
+    private final DirtyOrderBookSymbolRegistry dirtySymbolRegistry;
 
     @Value("${matching-engine.stream.batch-size:10}")
     private int batchSize;
@@ -159,38 +156,34 @@ public class MatchingEngineStreamConsumer {
             return;
         }
 
-        String lockValue;
-        try {
-            lockValue = symbolOrderLockService.acquire(symbol);
-        } catch (IllegalArgumentException e) {
-            log.debug("Skip matching because symbol lock is busy. recordId={}, symbol={}", record.getId(), symbol);
+        // 호가 트리거는 dirty set이 담당한다. 배포 전에 쌓인 backlog는 매칭 없이 배출만 한다.
+        if (ORDER_BOOK_UPDATED_REASON.equals(reason(value))) {
+            acknowledge(record);
+            clearRetryCount(record);
             return;
         }
 
         try {
-            matchUntilOrderBookVersionIsStable(symbol);
-            acknowledge(record);
-            clearRetryCount(record);
-        } catch (TossApiQuotaUnavailableException e) {
-            log.debug("Skip matching because Toss API quota is unavailable. symbol={}", symbol);
-            acknowledge(record);
-            clearRetryCount(record);
+            switch (symbolMatchingProcessor.process(symbol)) {
+                case SUCCESS, QUOTA_UNAVAILABLE -> {
+                    acknowledge(record);
+                    clearRetryCount(record);
+                }
+                case LOCK_BUSY -> {
+                    log.debug("Symbol lock is busy. recordId={}, symbol={}", record.getId(), symbol);
+                    // ACK하지 않으므로 PEL 복구가 최종 보장을 유지한다.
+                    // dirty set은 보조 신호로, PEL의 5초를 기다리지 않고 다음 드레인에 재시도되게 한다.
+                    dirtySymbolRegistry.markDirty(symbol);
+                }
+            }
         } catch (Exception e) {
             handleFailure(record, e);
-        } finally {
-            symbolOrderLockService.release(symbol, lockValue);
         }
     }
 
-    private void matchUntilOrderBookVersionIsStable(String symbol) {
-        long versionBeforeMatching;
-        long versionAfterMatching;
-        do {
-            versionBeforeMatching = orderBookService.getOrderBookVersion(symbol);
-            DailyPriceRangeResponse dailyPriceRange = dailyPriceRangeService.getDailyPriceRange(symbol);
-            matchingEngineTransactionService.matchSymbol(symbol, dailyPriceRange);
-            versionAfterMatching = orderBookService.getOrderBookVersion(symbol);
-        } while (versionAfterMatching != versionBeforeMatching);
+    private String reason(Map<Object, Object> value) {
+        Object reason = value.get("reason");
+        return reason == null ? "" : reason.toString();
     }
 
     private void handleFailure(MapRecord<String, Object, Object> record, Exception e) {

@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: paper-trading-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-papertrading}
+      POSTGRES_USER: ${POSTGRES_USER:-papertrading}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-papertrading}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-papertrading} -d ${POSTGRES_DB:-papertrading}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: paper-trading-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    container_name: paper-trading-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-papertrading}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-papertrading}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-papertrading}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # 마이그레이션 도구가 없어 로컬 검증에서는 ddl-auto로 스키마를 만든다.
+      SPRING_JPA_DDL_AUTO: update
+      JWT_SECRET: ${JWT_SECRET:-paper-trading-local-development-jwt-secret-key-change-me}
+      TOSS_INVEST_CLIENT_ID: ${TOSS_INVEST_CLIENT_ID:-}
+      TOSS_INVEST_SECRET_TOKEN: ${TOSS_INVEST_SECRET_TOKEN:-}
+      # 토스 허용 IP에 등록되지 않은 환경에서는 false로 두고 부팅만 확인한다.
+      TOSS_WS_ENABLED: ${TOSS_WS_ENABLED:-false}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+volumes:
+  postgres-data:
