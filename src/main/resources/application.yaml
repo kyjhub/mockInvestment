@@ -1,6 +1,21 @@
 spring:
   application:
     name: paper-trading
+  task:
+    scheduling:
+      # 기본값이 1이라 느린 작업 하나가 지연에 민감한 작업(WS 재선언·스트림 소비)을 막는다.
+      pool:
+        size: ${SCHEDULING_POOL_SIZE:4}
+      thread-name-prefix: scheduled-
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/papertrading}
+    username: ${SPRING_DATASOURCE_USERNAME:papertrading}
+    password: ${SPRING_DATASOURCE_PASSWORD:papertrading}
+  jpa:
+    hibernate:
+      # 마이그레이션 도구가 없어 로컬에서만 ddl-auto로 스키마를 만든다. 운영에서는 none을 유지한다.
+      ddl-auto: ${SPRING_JPA_DDL_AUTO:none}
+    open-in-view: false
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -57,7 +72,18 @@ orderbook:
     refresh-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_REFRESH_MS:5000}
     ttl-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_TTL_MS:30000}
 
+market-data:
+  polling:
+    scheduler:
+      pool-size: ${MARKET_DATA_POLLING_POOL_SIZE:3}
+
 matching-engine:
+  dirty-drain:
+    fixed-delay-ms: ${MATCHING_ENGINE_DIRTY_DRAIN_DELAY_MS:150}
+    # 한 사이클이 길어지면 fixedDelay 간격 가정이 깨진다. 실행 시간을 보며 조정한다.
+    batch-size: ${MATCHING_ENGINE_DIRTY_DRAIN_BATCH_SIZE:20}
+    # 매칭이 DB 커넥션을 점유하므로 HikariCP 최대 커넥션 수를 넘지 않아야 한다.
+    pool-size: ${MATCHING_ENGINE_DIRTY_DRAIN_POOL_SIZE:2}
   rematch:
     fixed-delay-ms: ${MATCHING_ENGINE_REMATCH_FIXED_DELAY_MS:30000}
   lock:

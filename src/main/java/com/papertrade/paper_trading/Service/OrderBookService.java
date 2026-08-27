@@ -9,7 +9,6 @@ import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.OrderBookPubSubMessage;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
-import com.papertrade.paper_trading.Dto.SymbolMatchRequestedEvent;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -24,7 +23,6 @@ public class OrderBookService {
 
     private static final String ORDER_BOOK_CACHE_KEY_PREFIX = "orderbook:";
     private static final String ORDER_BOOK_POLL_LOCK_KEY_PREFIX = "orderbook:poll-lock:";
-    private static final String ORDER_BOOK_VERSION_KEY_PREFIX = "orderbook:version:";
     private static final String LOCK_VALUE = "1";
 
     private final TossOrderBookClient tossOrderBookClient;
@@ -32,7 +30,7 @@ public class OrderBookService {
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
     private final OrderBookCacheProperties cacheProperties;
-    private final SymbolMatchRequestedStreamPublisher symbolMatchRequestedStreamPublisher;
+    private final DirtyOrderBookSymbolRegistry dirtySymbolRegistry;
 
     public OrderBookResponse getOrderBook(String symbol) {
         OrderBookResponse cachedResponse = getCachedOrderBook(symbol);
@@ -67,7 +65,7 @@ public class OrderBookService {
 
     /**
      * REST 응답과 WebSocket 푸시가 공통으로 합류하는 지점.
-     * 캐시 저장 → 변경 감지 → version 증가 → Pub/Sub 발행 → 매칭 요청 발행까지 한 번에 처리하므로,
+     * 캐시 저장 → 변경 감지 → 화면 전파 → 매칭 트리거까지 한 번에 처리하므로,
      * 호출자는 호가를 어디서 얻었는지 신경 쓰지 않아도 된다.
      */
     public OrderBookResponse applyOrderBook(String symbol, OrderBookResult result) {
@@ -75,11 +73,8 @@ public class OrderBookService {
         OrderBookResponse response = new OrderBookResponse(result, LocalDateTime.now());
         cacheOrderBook(symbol, response);
         if (orderBookChanged(previousResponse, response)) {
-            incrementOrderBookVersion(symbol);
-            publishOrderBook(symbol, response);
-            symbolMatchRequestedStreamPublisher.publish(
-                new SymbolMatchRequestedEvent(symbol, "ORDER_BOOK_UPDATED")
-            );
+            publishOrderBook(symbol, response);          // 화면 전파는 매 변경마다 필요하다
+            dirtySymbolRegistry.markDirty(symbol);       // 매칭 트리거는 종목 단위로 합쳐진다
         }
         return response;
     }
@@ -104,14 +99,6 @@ public class OrderBookService {
         return applyOrderBook(symbol, tossOrderBookClient.getOrderBook(symbol).result());
     }
 
-    public long getOrderBookVersion(String symbol) {
-        try {
-            String value = stringRedisTemplate.opsForValue().get(versionKey(symbol));
-            return value == null ? 0L : Long.parseLong(value);
-        } catch (RuntimeException ignored) {
-            return 0L;
-        }
-    }
 
     private OrderBookResponse getCachedOrderBook(String symbol) {
         try {
@@ -147,9 +134,6 @@ public class OrderBookService {
         }
     }
 
-    private void incrementOrderBookVersion(String symbol) {
-        stringRedisTemplate.opsForValue().increment(versionKey(symbol));
-    }
 
     private boolean orderBookChanged(OrderBookResponse previousResponse, OrderBookResponse response) {
         if (previousResponse == null || previousResponse.result() == null) {
@@ -180,7 +164,4 @@ public class OrderBookService {
         return ORDER_BOOK_CACHE_KEY_PREFIX + symbol;
     }
 
-    private String versionKey(String symbol) {
-        return ORDER_BOOK_VERSION_KEY_PREFIX + symbol;
-    }
 }
