@@ -239,11 +239,19 @@ public class MatchingEngineStreamConsumer {
         );
 
         log.error(
-            "Matching engine message moved to DLQ. sourceRecordId={}, retryCount={}",
+            "Matching engine message moved to DLQ. sourceRecordId={}, symbol={}, reason={}, retryCount={}",
             record.getId(),
+            payloadValue(record, "symbol"),
+            payloadValue(record, "reason"),
             retryCount,
             e
         );
+    }
+
+    /** 어느 종목이 실패했는지는 로그만 봐도 알 수 있어야 한다. DLQ를 열어봐야만 알 수 있으면 곤란하다. */
+    private String payloadValue(MapRecord<String, Object, Object> record, String key) {
+        Object value = record.getValue().get(key);
+        return value == null ? "" : value.toString();
     }
 
     private void acknowledge(MapRecord<String, Object, Object> record) {
