@@ -1,5 +1,6 @@
 package com.papertrade.paper_trading.Service;
 
+import com.papertrade.paper_trading.Config.SchedulingConfig;
 import com.papertrade.paper_trading.WebSocket.DailyPriceRangeSubscriptionRegistry;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -16,7 +17,7 @@ public class DailyPriceRangePollingService {
     private final DailyPriceRangeService dailyPriceRangeService;
     private int rotationOffset;
 
-    @Scheduled(fixedDelayString = "${daily-price-range.polling.fixed-delay-ms:1000}")
+    @Scheduled(scheduler = SchedulingConfig.MARKET_DATA_POLLING_SCHEDULER, fixedDelayString = "${daily-price-range.polling.fixed-delay-ms:1000}")
     public void pollActiveDailyPriceRanges() {
         List<String> symbols = new ArrayList<>(subscriptionRegistry.activeSymbols());
         Collections.sort(symbols);
