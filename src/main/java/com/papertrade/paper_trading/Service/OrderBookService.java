@@ -8,6 +8,7 @@ import com.papertrade.paper_trading.Config.OrderBookCacheProperties;
 import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.OrderBookPubSubMessage;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
+import com.papertrade.paper_trading.Dto.OrderBookResult;
 import com.papertrade.paper_trading.Dto.SymbolMatchRequestedEvent;
 import java.io.IOException;
 import java.time.Duration;
@@ -64,17 +65,14 @@ public class OrderBookService {
         }
     }
 
-    private OrderBookResponse fetchCacheAndPublish(String symbol) {
-        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
-            throw new TossApiQuotaUnavailableException(
-                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
-                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP),
-                "일시적으로 호가를 가져올 수 없습니다."
-            );
-        }
+    /**
+     * REST 응답과 WebSocket 푸시가 공통으로 합류하는 지점.
+     * 캐시 저장 → 변경 감지 → version 증가 → Pub/Sub 발행 → 매칭 요청 발행까지 한 번에 처리하므로,
+     * 호출자는 호가를 어디서 얻었는지 신경 쓰지 않아도 된다.
+     */
+    public OrderBookResponse applyOrderBook(String symbol, OrderBookResult result) {
         OrderBookResponse previousResponse = getCachedOrderBook(symbol);
-        OrderBookResponse rawResponse = tossOrderBookClient.getOrderBook(symbol);
-        OrderBookResponse response = new OrderBookResponse(rawResponse.result(), LocalDateTime.now());
+        OrderBookResponse response = new OrderBookResponse(result, LocalDateTime.now());
         cacheOrderBook(symbol, response);
         if (orderBookChanged(previousResponse, response)) {
             incrementOrderBookVersion(symbol);
@@ -84,6 +82,26 @@ public class OrderBookService {
             );
         }
         return response;
+    }
+
+    /** 캐시된 호가가 {@code threshold} 이내에 갱신됐는지. 공급원이 REST인지 WebSocket인지는 구분하지 않는다. */
+    public boolean isFresherThan(String symbol, Duration threshold) {
+        OrderBookResponse cachedResponse = getCachedOrderBook(symbol);
+        if (cachedResponse == null || cachedResponse.receivedAt() == null) {
+            return false;
+        }
+        return cachedResponse.receivedAt().isAfter(LocalDateTime.now().minus(threshold));
+    }
+
+    private OrderBookResponse fetchCacheAndPublish(String symbol) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_DATA_GROUP)) {
+            throw new TossApiQuotaUnavailableException(
+                TossApiRateLimiter.MARKET_DATA_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.MARKET_DATA_GROUP),
+                "일시적으로 호가를 가져올 수 없습니다."
+            );
+        }
+        return applyOrderBook(symbol, tossOrderBookClient.getOrderBook(symbol).result());
     }
 
     public long getOrderBookVersion(String symbol) {

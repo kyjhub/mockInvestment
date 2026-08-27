@@ -6,7 +6,7 @@
 
 실제 돈이 오가지 않는 환경에서 실제 시세로 거래를 경험하는 것이 목표이고, 다음 세 가지가 핵심입니다.
 
-- **실시간 시세 전파** — 외부 API 폴링 → Redis 캐시 → Pub/Sub 팬아웃 → STOMP WebSocket 푸시
+- **실시간 시세 전파** — 토스 WebSocket 수신(호가) 및 REST 폴링 → Redis 캐시 → Pub/Sub 팬아웃 → STOMP WebSocket 푸시
 - **종목 단위 비동기 매칭** — Redis Stream 기반 이벤트 처리, 재시도와 DLQ 포함
 - **내부·외부 유동성 동시 체결** — 사용자끼리의 주문 체결과 토스 호가를 상대로 한 체결을 함께 지원
 
@@ -22,7 +22,8 @@
 | 이벤트 처리 | Redis Stream (Consumer Group, PEL, DLQ) |
 | 서버 간 전파 | Redis Pub/Sub |
 | 클라이언트 전파 | STOMP over WebSocket |
-| 외부 시세 | 토스증권 Open API |
+| 외부 시세 | 토스증권 Open API (REST + WebSocket) |
+| 외부 인증 | OAuth 2.0 Client Credentials |
 | 직렬화 | Jackson 2 |
 
 ## 아키텍처
@@ -40,9 +41,11 @@
      |                       |                       |
      v                       v                       v
  PostgreSQL                Redis            토스증권 Open API
- 사용자, 계좌               시세 캐시            호가, 현재가
- 주문, 체결                 호출량 제한          일봉, 장 운영정보
- 보유량, 현금 원장          분산 락
+ 사용자, 계좌               시세 캐시            REST: 호가, 현재가
+ 주문, 체결                 호출량 제한                일봉, 장 운영정보
+ 보유량, 현금 원장          분산 락, WS 슬롯      WS: 실시간 호가
+                           access token 캐시
+                           활성 종목 집합
                            시세 Pub/Sub
                            매칭 Stream, DLQ
 ```
@@ -57,24 +60,54 @@ JWT 기반 stateless 인증입니다. Access token 30분, refresh token 14일이
 
 ### 실시간 시세
 
-호가, 현재가, 일일 고저가 세 종류가 같은 구조로 동작합니다.
+호가, 현재가, 일일 고저가 세 종류가 모두 Redis 캐시와 Pub/Sub를 거쳐 클라이언트에 전달됩니다. 캐시를 채우는 방법만 데이터별로 다릅니다.
 
 ```text
-폴링 스케줄러 → 토스 API → Redis 캐시 → Redis Pub/Sub → WebSocket 푸시
+[호가]      토스 WebSocket 푸시 ─┐
+[호가 폴백]  REST 폴링 ──────────┼→ Redis 캐시 → Redis Pub/Sub → STOMP 푸시
+[현재가]    REST 배치 폴링 ──────┤
+[고저가]    REST(캔들) + 자체 체결가 ─┘
 ```
 
-- 종목별 구독 레지스트리가 현재 구독자가 있는 종목만 폴링합니다.
-- 미체결 주문이 있는 종목은 1초, 구독만 있는 종목은 20초 주기로 조회합니다.
+호가는 REST 응답과 WebSocket 푸시가 `OrderBookService.applyOrderBook()` 한 지점으로 합류합니다. 그래서 캐시 저장, 변경 감지, Pub/Sub 발행, 매칭 트리거가 공급원과 무관하게 동일하게 동작합니다.
+
+**호가 — 토스 WebSocket**
+
+- 토스 한도가 계정당 연결 2개, 연결당 구독 100건이라 최대 **200종목**을 실시간으로 받습니다.
+- Redis 락으로 연결 슬롯을 점유한 인스턴스만 연결합니다. 그러지 않으면 새 연결이 기존 연결을 밀어내는 flapping이 발생합니다.
+- 구독 선언은 full-replace 방식이라 담당 종목이 바뀔 때마다 전체를 다시 선언하며, 선언 빈도 제한(5회/초)에 맞춰 250ms 디바운스를 둡니다.
+- 활성 종목이 200개를 넘으면 미체결 주문이 있는 종목이 슬롯을 우선 차지하고, 나머지는 REST 폴링으로 내려갑니다.
+
+**호가 — REST 폴백**
+
+- 폴링 대상 판정 기준은 "WebSocket 담당 종목인가"가 아니라 **"캐시가 신선한가"** 입니다. WebSocket이 멎으면 자동으로 폴백되고, 푸시가 재개되면 자동으로 빠집니다.
+- 임계값(기본 30초)이 WebSocket 재연결 시간(2~3초)보다 넉넉해서, 짧은 단절에는 폴백이 발동하지 않습니다.
 - 분산 락으로 여러 인스턴스가 같은 종목을 중복 호출하지 않게 합니다.
+
+**현재가와 일일 고저가**
+
+- 현재가는 한 번에 최대 200종목을 조회하는 배치 API를 써서 종목 수와 무관하게 초당 1~2회로 끝납니다. 실시간 대비 수 초 지연될 수 있습니다.
+- 일일 고저가는 캔들 API로 채우고, 이후에는 자체 체결가로 갱신하므로 API 호출은 캐시 미스 때만 발생합니다.
+
+### 토스 API 인증
+
+OAuth 2.0 client credentials로 발급받은 access token을 사용합니다. 토큰 수명이 24시간이라 Redis에 캐싱해 인스턴스 간에 공유하고, 만료 10분 전에 캐시를 버려 재발급합니다. 401을 받으면 재발급 후 1회만 재시도합니다. WebSocket handshake도 같은 토큰을 쓰지만 인증이 연결 시점 1회뿐이라, 연결 유지 중 토큰이 만료돼도 끊기지 않습니다.
+
+> 토스는 **허용 IP 목록**을 REST와 WebSocket 양쪽에 적용합니다. 등록되지 않은 IP는 토큰 발급 단계에서 `403`으로 거부되므로, 실행 환경의 공인 IP를 WTS 설정 > Open API > 허용 IP 관리에 등록해야 합니다.
 
 ### 토스 API 호출량 제한
 
-토스 API는 그룹 단위 초당 호출 한도가 있어서, Redis 기반 분산 rate limiter가 예산을 관리합니다.
+토스 API는 그룹 단위 초당 호출 한도가 있어서, Redis 기반 분산 rate limiter가 예산을 관리합니다. 그룹 구성과 한도는 토스 스펙을 그대로 따릅니다.
 
-- **그룹 A** — 호가 + 현재가 + 캔들
-- **그룹 B** — 장 운영정보 + 환율
+| 그룹 | 대상 API | 초당 한도 |
+| --- | --- | --- |
+| `market-data` | 호가, 현재가, 최근 체결, 상/하한가 | 15 |
+| `market-data-chart` | 캔들 | 20 |
+| `market-info` | 장 운영정보, 환율 | 3 |
 
-정기 폴링, REST 캐시 미스, 매칭 엔진 캐시 미스 세 경로가 모두 같은 지점을 거치므로 우회가 없습니다. 429 응답 헤더로 실제 한도를 학습하고, 예산이 소진되면 그룹 A는 `202 Accepted`(pending 응답, 실제 데이터는 WebSocket으로 전달)를, 그룹 B는 `503`을 `Retry-After`와 함께 반환합니다.
+여기에 안전마진(기본 0.8)을 곱한 값을 실효 한도로 씁니다. 정기 폴링, REST 캐시 미스, 매칭 엔진 캐시 미스 세 경로가 모두 같은 지점을 거치므로 우회가 없습니다. 429 응답 헤더로 실제 한도를 학습하고, 예산이 소진되면 WebSocket 푸시 채널이 있는 그룹(`market-data`, `market-data-chart`)은 `202 Accepted`(pending 응답, 실제 데이터는 WebSocket으로 전달)를, 푸시 채널이 없는 `market-info`는 `503`을 `Retry-After`와 함께 반환합니다.
+
+호가를 WebSocket으로 받으면서 `market-data` 예산 대부분이 남으므로, 200종목 초과분과 신규 종목 조회에 그 여유가 쓰입니다.
 
 ### 주문과 매칭
 
@@ -169,13 +202,17 @@ STOMP 엔드포인트는 `/ws`이고, 브로커 prefix는 `/topic`입니다.
 export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/papertrading
 export SPRING_DATASOURCE_USERNAME=...
 export SPRING_DATASOURCE_PASSWORD=...
-export TOSS_INVEST_SECRET_TOKEN=...
+export TOSS_INVEST_CLIENT_ID=...       # OAuth2 client_id
+export TOSS_INVEST_SECRET_TOKEN=...    # OAuth2 client_secret
 export JWT_SECRET=...   # 기본값은 로컬 개발용이므로 운영에서는 반드시 교체
 
 # 선택 (기본값 있음)
 export REDIS_HOST=localhost
 export REDIS_PORT=6379
+export TOSS_WS_ENABLED=true            # false면 호가도 REST 폴링으로만 처리
 ```
+
+`TOSS_INVEST_SECRET_TOKEN`은 Bearer 토큰이 아니라 OAuth2 `client_secret`입니다. 이 값을 그대로 `Authorization` 헤더에 넣으면 `401 invalid-token`이 납니다.
 
 ### 빌드와 실행
 
@@ -202,9 +239,18 @@ PostgreSQL datasource가 없으면 `contextLoads()`가 실패합니다. 나머�
 | --- | --- | --- |
 | `security.jwt.access-token-expiration-minutes` | 30 | Access token 만료 |
 | `security.jwt.refresh-token-expiration-days` | 14 | Refresh token 만료 |
+| `toss-invest.rate-limit.market-data.default-limit` | 15 | 호가·현재가 그룹 초당 한도 |
+| `toss-invest.rate-limit.market-data-chart.default-limit` | 20 | 캔들 그룹 초당 한도 |
+| `toss-invest.rate-limit.market-info.default-limit` | 3 | 장 운영정보 그룹 초당 한도 |
+| `toss-invest.websocket.enabled` | true | 호가 WebSocket 수신 사용 여부 |
+| `toss-invest.websocket.connection-slots` | 2 | 계정당 동시 연결 수 (토스 한도) |
+| `toss-invest.websocket.max-symbols-per-connection` | 100 | 연결당 구독 종목 수 (토스 한도) |
+| `toss-invest.websocket.declare-debounce-ms` | 250 | 구독 재선언 디바운스 |
+| `toss-invest.websocket.ping-interval-seconds` | 60 | keepalive PING 주기 |
 | `orderbook.cache.ttl-seconds` | 30 | 호가 캐시 TTL |
 | `orderbook.polling.fixed-delay-ms` | 1000 | 미체결 주문 종목 폴링 주기 |
 | `orderbook.polling.idle-fixed-delay-ms` | 20000 | 구독만 있는 종목 폴링 주기 |
+| `orderbook.polling.staleness-threshold-ms` | 30000 | 이보다 캐시가 낡아야 폴링 대상 |
 | `price.cache.ttl-seconds` | 2 | 현재가 캐시 TTL |
 | `daily-price-range.cache.ttl-seconds` | 5 | 일일 고저가 캐시 TTL |
 | `market-calendar.cache.ttl-hours` | 12 | 장 운영정보 캐시 TTL |
@@ -212,14 +258,16 @@ PostgreSQL datasource가 없으면 `contextLoads()`가 실패합니다. 나머�
 | `matching-engine.rematch.fixed-delay-ms` | 30000 | 안전망 재매칭 주기 |
 | `matching-engine.stream.max-retry-count` | 5 | DLQ 이동 전 최대 재시도 |
 
+`toss-invest.websocket.enabled=false`로 두면 WebSocket 수신을 끄고 기존 REST 폴링만으로 동작합니다.
+
 ## 프로젝트 구조
 
 ```text
 src/main/java/com/papertrade/paper_trading/
 ├── Controller/   인증, 시세, 주문 REST API + 공통 예외 처리
-├── Service/      매칭 엔진, 시세 폴링·캐시, 인증, 수수료 계산
-├── Client/       토스증권 API 클라이언트, 호출량 제한
-├── WebSocket/    STOMP 설정, 구독 레지스트리, Redis 구독자
+├── Service/      매칭 엔진, 시세 폴링·캐시, 활성 종목 레지스트리, 인증, 수수료 계산
+├── Client/       토스증권 API 클라이언트, OAuth2 토큰 발급, 호출량 제한
+├── WebSocket/    STOMP 설정, 구독 레지스트리, Redis 구독자, 토스 WebSocket 수신
 ├── Repository/   Spring Data JPA 리포지토리
 ├── Entity/       JPA 엔티티
 ├── Dto/          요청·응답, Pub/Sub 메시지 (record)
@@ -233,9 +281,11 @@ src/main/java/com/papertrade/paper_trading/
 현재 동작하는 기능입니다.
 
 - 회원가입, 로그인, 토큰 재발급·폐기
+- 토스 OAuth2 토큰 발급·캐싱·갱신
 - 호가·현재가·일일 고저가 REST 조회와 WebSocket 실시간 푸시
+- 토스 WebSocket 호가 수신 (연결 슬롯 분산 점유, 구독 디바운스, 재연결 백오프)
 - 미국 장 운영정보 조회
-- 토스 API 호출량 제한과 예산 소진 대응
+- 토스 API 호출량 제한(3개 그룹)과 예산 소진 대응
 - 주문 접수·취소, 종목 단위 비동기 매칭, 체결과 현금 원장 기록
 
 아직 구현되지 않은 기능입니다.
@@ -252,3 +302,4 @@ src/main/java/com/papertrade/paper_trading/
 ## 문서
 
 - [`docs/current-implementation-overview.md`](docs/current-implementation-overview.md) — 코드 기준 구현 현황, 데이터 흐름, 설정, 구현 경계와 주의점
+- [`docs/plans/`](docs/plans) — 기능별 설계 계획. 각 문서에 결정의 배경과 대안 검토가 함께 기록되어 있습니다.

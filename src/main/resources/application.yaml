@@ -15,14 +15,29 @@ security:
 toss-invest:
   openapi:
     base-url: https://openapi.tossinvest.com
+    client-id: ${TOSS_INVEST_CLIENT_ID:}
     secret-token: ${TOSS_INVEST_SECRET_TOKEN:}
   rate-limit:
-    orderbook-price-candle:
-      default-limit: ${TOSS_RATE_LIMIT_GROUP_A_DEFAULT:5}
-      safety-margin: ${TOSS_RATE_LIMIT_GROUP_A_MARGIN:0.8}
-    market-calendar-exchange-rate:
-      default-limit: ${TOSS_RATE_LIMIT_GROUP_B_DEFAULT:5}
-      safety-margin: ${TOSS_RATE_LIMIT_GROUP_B_MARGIN:0.8}
+    # 토스 실제 한도: MARKET_DATA 15, MARKET_DATA_CHART 20, MARKET_INFO 3 (초당)
+    market-data:
+      default-limit: ${TOSS_RATE_LIMIT_MARKET_DATA:15}
+      safety-margin: ${TOSS_RATE_LIMIT_MARKET_DATA_MARGIN:0.8}
+    market-data-chart:
+      default-limit: ${TOSS_RATE_LIMIT_MARKET_DATA_CHART:20}
+      safety-margin: ${TOSS_RATE_LIMIT_MARKET_DATA_CHART_MARGIN:0.8}
+    market-info:
+      default-limit: ${TOSS_RATE_LIMIT_MARKET_INFO:3}
+      safety-margin: ${TOSS_RATE_LIMIT_MARKET_INFO_MARGIN:0.8}
+  websocket:
+    enabled: ${TOSS_WS_ENABLED:true}
+    url: ${TOSS_WS_URL:wss://openapi-ws.tossinvest.com/ws/v1}
+    market: ${TOSS_WS_MARKET:us}
+    max-symbols-per-connection: ${TOSS_WS_MAX_SYMBOLS_PER_CONNECTION:100}
+    connection-slots: ${TOSS_WS_CONNECTION_SLOTS:2}
+    declare-debounce-ms: ${TOSS_WS_DECLARE_DEBOUNCE_MS:250}
+    ping-interval-seconds: ${TOSS_WS_PING_INTERVAL_SECONDS:60}
+    slot-lock-ttl-ms: ${TOSS_WS_SLOT_LOCK_TTL_MS:15000}
+    slot-heartbeat-ms: ${TOSS_WS_SLOT_HEARTBEAT_MS:5000}
 
 market-calendar:
   cache:
@@ -35,6 +50,12 @@ orderbook:
     fixed-delay-ms: ${ORDERBOOK_POLLING_FIXED_DELAY_MS:1000}
     idle-fixed-delay-ms: ${ORDERBOOK_POLLING_IDLE_FIXED_DELAY_MS:20000}
     lock-ttl-ms: ${ORDERBOOK_POLLING_LOCK_TTL_MS:900}
+    # 이 시간보다 캐시가 낡았을 때만 REST 폴링 대상이 된다.
+    # WebSocket 재연결(2~3초)보다 넉넉해야 짧은 단절에 폴백이 헛돌지 않는다.
+    staleness-threshold-ms: ${ORDERBOOK_STALENESS_THRESHOLD_MS:30000}
+  active-symbols:
+    refresh-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_REFRESH_MS:5000}
+    ttl-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_TTL_MS:30000}
 
 matching-engine:
   rematch:

@@ -89,10 +89,10 @@ public class DailyPriceRangeService {
     }
 
     private DailyPriceRangeResponse fetchCacheAndPublish(String symbol) {
-        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_DATA_CHART_GROUP)) {
             throw new TossApiQuotaUnavailableException(
-                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
-                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP),
+                TossApiRateLimiter.MARKET_DATA_CHART_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.MARKET_DATA_CHART_GROUP),
                 "일시적으로 일봉 데이터를 가져올 수 없습니다."
             );
         }

@@ -23,6 +23,7 @@ import java.math.RoundingMode;
 import java.util.Comparator;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -32,6 +33,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class MatchingEngineTransactionService {
 
     private static final int MONEY_SCALE = 2;
@@ -58,7 +60,20 @@ public class MatchingEngineTransactionService {
             // Toss 호출은 주문의 pessimistic lock을 잡기 전, transaction 밖에서 수행한다.
             OrderBookResponse orderBook = orderBookService.getOrderBookNoOlderThan(symbol, matchableOrder.submittedAt());
             Long orderId = matchableOrder.id();
-            transactionTemplate.executeWithoutResult(ignored -> matchOrder(orderId, orderBook, dailyPriceRange));
+            try {
+                transactionTemplate.executeWithoutResult(ignored -> matchOrder(orderId, orderBook, dailyPriceRange));
+            } catch (IllegalArgumentException e) {
+                // 이 주문 하나가 잘못된 경우다. 여기서 루프를 중단하면 뒤에 줄 선 정상 주문까지 영영 처리되지 않고,
+                // 재시도해도 같은 주문이 같은 자리에서 다시 막으므로 종목 전체의 체결이 멈춘다.
+                // DB·외부 API 장애 같은 시스템 문제는 잡지 않고 전파해서 재시도와 DLQ 경로를 그대로 타게 한다.
+                log.error(
+                    "Skipping order that cannot be matched. symbol={}, orderId={}, reason={}",
+                    symbol,
+                    orderId,
+                    e.getMessage(),
+                    e
+                );
+            }
         }
     }
 
