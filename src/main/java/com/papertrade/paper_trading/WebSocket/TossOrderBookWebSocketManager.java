@@ -76,7 +76,7 @@ public class TossOrderBookWebSocketManager {
             return;
         }
 
-        List<String> assigned = cachedWebSocketSymbols();
+        List<String> assigned = coveredSymbols();
         for (Map.Entry<Integer, TossOrderBookWebSocketConnection> entry : connections.entrySet()) {
             TossOrderBookWebSocketConnection connection = entry.getValue();
             connection.setDesiredSymbols(symbolsForSlot(assigned, entry.getKey()));
@@ -87,30 +87,49 @@ public class TossOrderBookWebSocketManager {
     }
 
     /**
-     * 선언 틱은 250ms마다 돌지만 활성 종목 재계산은 DB 조회를 동반하므로 그 주기로 반복하면 낭비다.
-     * 구독 변화가 반영되기까지 최대 1초 늦어지는 대신 DB 부하를 1/4로 낮춘다.
+     * WebSocket이 채워주기로 한 종목. 폴링 제외 판단에 쓰인다.
+     *
+     * <p>주의: 이건 "배정하려는 종목"이지 "실제로 프레임을 받고 있는 종목"이 아니다.
+     * 연결이 끊긴 동안에도 covered로 남는 것은 의도한 동작으로, 캐시가 신선도 임계값을 넘기면
+     * 폴링이 자동으로 폴백한다. 다만 구독이 거절된 종목({@code stock-not-found} 등)은
+     * WebSocket이 영원히 채우지 않으므로 제외한다.
+     *
+     * <p>계산이 DB 조회를 동반하므로 결과를 캐싱한다. 폴링과 선언 틱이 모두 이 값을 쓴다.
      */
-    private List<String> cachedWebSocketSymbols() {
+    public List<String> coveredSymbols() {
         long now = System.currentTimeMillis();
         if (now - symbolsComputedAt < SYMBOL_RECOMPUTE_INTERVAL_MILLIS && cachedSymbols != null) {
             return cachedSymbols;
         }
-        cachedSymbols = webSocketSymbols();
+        cachedSymbols = computeCoveredSymbols();
         symbolsComputedAt = now;
         return cachedSymbols;
     }
 
     /**
-     * WebSocket이 담당하는 종목. 전역 활성 종목 중 우선순위 상위 {@code maxSymbols()}개다.
+     * 전역 활성 종목 중 우선순위 상위 {@code maxSymbols()}개.
      * 이 목록에 들어가면 실시간 푸시를 받고, 밀려나면 REST 폴링으로 처리된다.
      */
-    public List<String> webSocketSymbols() {
+    private List<String> computeCoveredSymbols() {
         if (!properties.enabled()) {
             return List.of();
         }
-        List<String> ordered = activeSymbolRegistry.orderedActiveSymbols();
+
+        Set<String> rejected = rejectedSymbols();
+        List<String> ordered = activeSymbolRegistry.orderedActiveSymbols().stream()
+            .filter(symbol -> !rejected.contains(symbol))
+            .toList();
         int limit = Math.min(ordered.size(), properties.maxSymbols());
-        return ordered.subList(0, limit);
+        return List.copyOf(ordered.subList(0, limit));
+    }
+
+    /** 구독이 거절된 종목. 원인을 고치기 전엔 재선언해도 계속 거부되므로 담당 대상에서 뺀다. */
+    private Set<String> rejectedSymbols() {
+        Set<String> rejected = new HashSet<>();
+        for (TossOrderBookWebSocketConnection connection : connections.values()) {
+            rejected.addAll(connection.rejectedSymbols());
+        }
+        return rejected;
     }
 
     /** 실제로 이 인스턴스가 구독을 선언해 둔 종목. 폴링 제외 판단이 아니라 관측용이다. */
