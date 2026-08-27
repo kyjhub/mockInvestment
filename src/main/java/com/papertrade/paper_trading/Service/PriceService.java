@@ -90,10 +90,10 @@ public class PriceService {
     }
 
     private PriceResponse fetchCacheAndPublish(List<String> symbols) {
-        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP)) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_DATA_GROUP)) {
             throw new TossApiQuotaUnavailableException(
-                TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP,
-                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP),
+                TossApiRateLimiter.MARKET_DATA_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.MARKET_DATA_GROUP),
                 "일시적으로 현재가를 가져올 수 없습니다."
             );
         }

@@ -15,8 +15,12 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class TossApiRateLimiter {
 
-    public static final String ORDERBOOK_PRICE_CANDLE_GROUP = "orderbook-price-candle";
-    public static final String MARKET_CALENDAR_EXCHANGE_RATE_GROUP = "market-calendar-exchange-rate";
+    /** 호가, 현재가, 최근 체결, 상/하한가. 토스 기준 초당 15회. */
+    public static final String MARKET_DATA_GROUP = "market-data";
+    /** 캔들 차트. 호출 부하 특성이 달라 토스가 별도 그룹으로 분리했고 초당 20회. */
+    public static final String MARKET_DATA_CHART_GROUP = "market-data-chart";
+    /** 장 운영정보, 환율. 토스 기준 초당 3회. */
+    public static final String MARKET_INFO_GROUP = "market-info";
 
     private static final String QUOTA_KEY_PREFIX = "toss-api:quota:";
     // X-RateLimit-Limit	현재 허용된 초당 요청 수 (burst capacity)

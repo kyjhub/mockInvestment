@@ -36,10 +36,10 @@ public class MarketCalendarService {
             return cachedResponse;
         }
 
-        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP)) {
+        if (!tossApiRateLimiter.tryAcquire(TossApiRateLimiter.MARKET_INFO_GROUP)) {
             throw new TossApiQuotaUnavailableException(
-                TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP,
-                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.MARKET_CALENDAR_EXCHANGE_RATE_GROUP),
+                TossApiRateLimiter.MARKET_INFO_GROUP,
+                tossApiRateLimiter.secondsUntilAvailable(TossApiRateLimiter.MARKET_INFO_GROUP),
                 "일시적으로 장 운영정보를 가져올 수 없습니다."
             );
         }

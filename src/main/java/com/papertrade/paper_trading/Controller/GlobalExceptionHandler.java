@@ -6,6 +6,7 @@ import com.papertrade.paper_trading.Client.TossApiRateLimiter;
 import jakarta.validation.ConstraintViolationException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -19,6 +20,16 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
+
+    /**
+     * 예산이 소진돼도 202 pending으로 응답할 수 있는 그룹.
+     * 판정 기준은 그룹 이름이 아니라 "WebSocket 푸시 채널로 실제 데이터가 전달되는가"다.
+     * market-info(장 운영정보)는 푸시 채널이 없어서 503 + Retry-After를 유지한다.
+     */
+    private static final Set<String> PUSH_CHANNEL_GROUPS = Set.of(
+        TossApiRateLimiter.MARKET_DATA_GROUP,
+        TossApiRateLimiter.MARKET_DATA_CHART_GROUP
+    );
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, String>> handleIllegalArgumentException(IllegalArgumentException exception) {
@@ -67,7 +78,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, String>> handleTossApiQuotaUnavailableException(
         TossApiQuotaUnavailableException exception
     ) {
-        boolean pendingResponse = TossApiRateLimiter.ORDERBOOK_PRICE_CANDLE_GROUP.equals(exception.group());
+        boolean pendingResponse = PUSH_CHANNEL_GROUPS.contains(exception.group());
         HttpStatus status = pendingResponse ? HttpStatus.ACCEPTED : HttpStatus.SERVICE_UNAVAILABLE;
         Map<String, String> body = pendingResponse
             ? Map.of(
