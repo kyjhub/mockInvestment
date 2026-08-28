@@ -11,6 +11,7 @@ import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -84,64 +85,43 @@ public class TossOrderBookWebSocketManager {
             return;
         }
 
-        List<String> assigned = assignedSymbols();
+        List<String> ordered = orderedActiveSymbols();
+        Set<String> rejected = rejectedSymbolRegistry.rejectedSymbols();
         for (Map.Entry<Integer, TossOrderBookWebSocketConnection> entry : connections.entrySet()) {
             TossOrderBookWebSocketConnection connection = entry.getValue();
-            connection.setDesiredSymbols(symbolsForSlot(assigned, entry.getKey()));
+            connection.setDesiredSymbols(symbolsForSlot(ordered, entry.getKey(), rejected));
             connection.ensureConnected();
             connection.declareIfChanged();
             connection.pingIfDue();
         }
     }
 
-    /**
-     * 슬롯에 배정할 종목. <b>거절 여부로 거르지 않는다.</b>
-     *
-     * <p>거절 정보는 슬롯을 소유한 인스턴스만 아는데, 그것으로 목록을 먼저 걸러버리면
-     * 서버마다 목록 길이가 달라져 인덱스 홀짝 배정이 어긋난다. 그러면 어떤 종목은 두 연결이
-     * 중복 구독하고 어떤 종목은 아무도 구독하지 않는다. 그래서 배정은 모든 인스턴스가
-     * 동일하게 계산할 수 있는 원본 목록으로 하고, 거절된 종목은 각 연결이 자기 선언에서만 뺀다.
-     */
-    private List<String> assignedSymbols() {
+    /** 우선순위 정렬된 전역 활성 종목 전체. DB 조회를 동반하므로 캐싱한다. */
+    private List<String> orderedActiveSymbols() {
         long now = System.currentTimeMillis();
         if (now - symbolsComputedAt < SYMBOL_RECOMPUTE_INTERVAL_MILLIS && cachedSymbols != null) {
             return cachedSymbols;
         }
-        cachedSymbols = computeAssignedSymbols();
+        cachedSymbols = properties.enabled() ? activeSymbolRegistry.orderedActiveSymbols() : List.of();
         symbolsComputedAt = now;
         return cachedSymbols;
     }
 
     /**
-     * 전역 활성 종목 중 우선순위 상위 {@code maxSymbols()}개.
-     * 이 목록에 들어가면 실시간 푸시를 받고, 밀려나면 REST 폴링으로 처리된다.
-     */
-    private List<String> computeAssignedSymbols() {
-        if (!properties.enabled()) {
-            return List.of();
-        }
-
-        List<String> ordered = activeSymbolRegistry.orderedActiveSymbols();
-        int limit = Math.min(ordered.size(), properties.maxSymbols());
-        return List.copyOf(ordered.subList(0, limit));
-    }
-
-    /**
      * WebSocket이 실제로 채워줄 종목. 폴링 제외 판단에 쓰인다.
      *
-     * <p>주의: 이건 "배정된 종목"이지 "지금 프레임을 받고 있는 종목"이 아니다.
+     * <p>주의: 이건 "구독하기로 한 종목"이지 "지금 프레임을 받고 있는 종목"이 아니다.
      * 연결이 끊긴 동안에도 covered로 남는 것은 의도한 동작으로, 캐시가 신선도 임계값을 넘기면
-     * 폴링이 자동으로 폴백한다. 다만 구독이 거절된 종목은 WebSocket이 채우지 않으므로 제외해야
-     * REST 폴링이 가져간다. 거절 정보는 슬롯 소유자만 알기 때문에 Redis로 공유한다.
+     * 폴링이 자동으로 폴백한다.
      */
     public List<String> coveredSymbols() {
+        List<String> ordered = orderedActiveSymbols();
         Set<String> rejected = rejectedSymbolRegistry.rejectedSymbols();
-        if (rejected.isEmpty()) {
-            return assignedSymbols();
+        Set<String> covered = new LinkedHashSet<>();
+        for (int slotIndex = 0; slotIndex < properties.connectionSlots(); slotIndex++) {
+            covered.addAll(symbolsForSlot(ordered, slotIndex, rejected));
         }
-        return assignedSymbols().stream()
-            .filter(symbol -> !rejected.contains(symbol))
-            .toList();
+        return List.copyOf(covered);
     }
 
     /** 실제로 이 인스턴스가 구독을 선언해 둔 종목. 폴링 제외 판단이 아니라 관측용이다. */
@@ -154,17 +134,28 @@ public class TossOrderBookWebSocketManager {
     }
 
     /**
-     * 인덱스 홀짝으로 슬롯을 나눈다. 해시 샤딩은 한쪽에 몰려 too-many-topics가 날 수 있어서,
-     * 각 슬롯이 연결당 구독 한도를 넘지 않음을 보장하는 이 방식을 쓴다.
+     * 슬롯이 담당할 종목을 고른다.
+     *
+     * <p>각 슬롯은 전체 목록에서 <b>자기 인덱스 계열만</b> 훑는다(슬롯 2개면 짝수/홀수).
+     * 계열이 서로 겹치지 않으므로 <b>어떤 슬롯이 무엇을 거절로 건너뛰든 다른 슬롯과 중복될 수 없고</b>,
+     * 인스턴스마다 거절 정보가 달라도 마찬가지다. 슬롯 간 조율 없이 중복과 누락이 동시에 막힌다.
+     *
+     * <p>거절된 종목은 건너뛰고 자기 계열에서 다음 종목을 당겨온다. 이렇게 하지 않으면
+     * 거절된 종목이 배정 자리만 차지해 슬롯이 한도보다 적게 채워진다.
+     *
+     * <p>해시 샤딩을 쓰지 않는 이유는 한쪽에 몰려 연결당 구독 한도를 넘길 수 있기 때문이다.
      */
-    // 배정 불변식(슬롯당 한도 준수, 중복 없음, 전량 배정)을 테스트에서 검증하기 위해 package-private.
-    List<String> symbolsForSlot(List<String> assigned, int slotIndex) {
+    // 배정 불변식(슬롯당 한도 준수, 중복 없음, 누락 없음)을 테스트에서 검증하기 위해 package-private.
+    List<String> symbolsForSlot(List<String> ordered, int slotIndex, Set<String> rejected) {
         List<String> symbols = new ArrayList<>();
-        for (int i = slotIndex; i < assigned.size(); i += properties.connectionSlots()) {
-            symbols.add(assigned.get(i));
+        int limit = properties.maxSymbolsPerConnection();
+        for (int i = slotIndex; i < ordered.size() && symbols.size() < limit; i += properties.connectionSlots()) {
+            String symbol = ordered.get(i);
+            if (!rejected.contains(symbol)) {
+                symbols.add(symbol);
+            }
         }
-        int limit = Math.min(symbols.size(), properties.maxSymbolsPerConnection());
-        return symbols.subList(0, limit);
+        return symbols;
     }
 
     private TossOrderBookWebSocketConnection newConnection(int slotIndex) {

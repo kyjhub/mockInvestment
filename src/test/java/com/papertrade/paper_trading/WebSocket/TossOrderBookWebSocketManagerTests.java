@@ -6,6 +6,7 @@ import com.papertrade.paper_trading.Config.TossWebSocketProperties;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class TossOrderBookWebSocketManagerTests {
@@ -25,50 +26,65 @@ class TossOrderBookWebSocketManagerTests {
 
     @Test
     void splitsSymbolsAcrossSlotsWithoutOverlapOrLoss() {
-        List<String> assigned = symbols(150);
+        List<String> ordered = symbols(150);
 
-        List<String> slot0 = manager.symbolsForSlot(assigned, 0);
-        List<String> slot1 = manager.symbolsForSlot(assigned, 1);
+        List<String> slot0 = manager.symbolsForSlot(ordered, 0, Set.of());
+        List<String> slot1 = manager.symbolsForSlot(ordered, 1, Set.of());
 
         assertThat(slot0).doesNotContainAnyElementsOf(slot1);
 
         List<String> union = new ArrayList<>(slot0);
         union.addAll(slot1);
-        assertThat(union).containsExactlyInAnyOrderElementsOf(assigned);
+        assertThat(union).containsExactlyInAnyOrderElementsOf(ordered);
     }
 
     @Test
     void neverExceedsPerConnectionSubscriptionLimit() {
         // 슬롯 전체 수용량(200)을 넘는 입력이 들어와도 연결당 한도를 넘지 않아야 한다.
         // 넘으면 토스가 선언 전체를 too-many-topics로 거부한다.
-        List<String> assigned = symbols(260);
+        List<String> ordered = symbols(260);
 
         for (int slotIndex = 0; slotIndex < SLOTS; slotIndex++) {
-            assertThat(manager.symbolsForSlot(assigned, slotIndex)).hasSizeLessThanOrEqualTo(MAX_PER_CONNECTION);
+            assertThat(manager.symbolsForSlot(ordered, slotIndex, Set.of()))
+                .hasSizeLessThanOrEqualTo(MAX_PER_CONNECTION);
         }
     }
 
     @Test
-    void assignmentDependsOnlyOnTheSharedOrderedList() {
-        // 거절 정보는 슬롯 소유자만 안다. 그것으로 목록을 먼저 걸러 배정하면 서버마다 결과가 달라져
-        // 어떤 종목은 두 연결이 중복 구독하고 어떤 종목은 아무도 구독하지 않게 된다.
-        // 배정은 원본 목록만 보고 계산되어야 어느 인스턴스에서 돌려도 같은 결과가 나온다.
-        List<String> assigned = List.of("A", "B", "C", "D");
+    void rejectedSymbolDoesNotLeaveAnEmptyAssignmentSlot() {
+        // 거절된 종목이 자리만 차지하면 슬롯이 한도보다 적게 채워지고 구독 정원이 낭비된다.
+        // 자기 계열에서 다음 종목을 당겨와 채워야 한다.
+        List<String> ordered = List.of("A", "B", "C", "D", "E", "F");
 
-        assertThat(manager.symbolsForSlot(assigned, 0)).containsExactly("A", "C");
-        assertThat(manager.symbolsForSlot(assigned, 1)).containsExactly("B", "D");
+        assertThat(manager.symbolsForSlot(ordered, 0, Set.of())).containsExactly("A", "C", "E");
+        assertThat(manager.symbolsForSlot(ordered, 0, Set.of("A"))).containsExactly("C", "E");
+    }
 
-        // 거절된 A를 뺀 목록으로 배정하면 B와 D가 겹치고 C는 누락된다 — 그래서 이 방식을 쓰지 않는다.
-        List<String> filtered = List.of("B", "C", "D");
-        assertThat(manager.symbolsForSlot(filtered, 0)).containsExactly("B", "D");
+    @Test
+    void divergentRejectionKnowledgeStillProducesNoOverlapAndNoGap() {
+        // 거절 정보는 슬롯을 소유한 인스턴스만 안다. 서버마다 아는 내용이 달라도
+        // 각 슬롯은 자기 인덱스 계열만 훑으므로 중복도 누락도 생기지 않아야 한다.
+        List<String> ordered = List.of("A", "B", "C", "D", "E", "F");
+
+        // 서버1은 slot 0을 갖고 A가 거절된 것을 안다.
+        List<String> slot0 = manager.symbolsForSlot(ordered, 0, Set.of("A"));
+        // 서버2는 slot 1을 갖고 A 거절을 모른다.
+        List<String> slot1 = manager.symbolsForSlot(ordered, 1, Set.of());
+
+        assertThat(slot0).doesNotContainAnyElementsOf(slot1);
+
+        List<String> union = new ArrayList<>(slot0);
+        union.addAll(slot1);
+        // 거절된 A만 빠지고 나머지는 정확히 한 번씩 구독된다.
+        assertThat(union).containsExactlyInAnyOrder("B", "C", "D", "E", "F");
     }
 
     @Test
     void handlesFewerSymbolsThanSlots() {
-        List<String> assigned = List.of("AAPL");
+        List<String> ordered = List.of("AAPL");
 
-        assertThat(manager.symbolsForSlot(assigned, 0)).containsExactly("AAPL");
-        assertThat(manager.symbolsForSlot(assigned, 1)).isEmpty();
+        assertThat(manager.symbolsForSlot(ordered, 0, Set.of())).containsExactly("AAPL");
+        assertThat(manager.symbolsForSlot(ordered, 1, Set.of())).isEmpty();
     }
 
     private List<String> symbols(int count) {
