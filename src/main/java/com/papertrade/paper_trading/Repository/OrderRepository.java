@@ -62,8 +62,23 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         Pageable pageable
     );
 
-    @Query("select distinct o.stock.id from Order o where o.status in :statuses")
-    List<Long> findDistinctStockIdsByStatusIn(@Param("statuses") Collection<OrderStatus> statuses);
+    /**
+     * 미체결 주문이 있는 종목을 <b>가장 먼저 접수된 주문 시각 순</b>으로 반환한다.
+     *
+     * <p>이 순서가 WebSocket 실시간 호가 정원(연결당 100 × 슬롯 수)을 누가 차지할지 정한다.
+     * 정원을 넘긴 종목은 REST 폴링으로 밀려 갱신이 크게 느려지므로, 먼저 낸 주문이 먼저 기회를 받도록 한다.
+     * 종목 <i>안에서의</i> 체결 순서는 {@link #findMatchableOrdersBySymbol}의 가격-시간 우선순위가 정한다.
+     */
+    @Query("""
+        select o.stock.id
+        from Order o
+        where o.status in :statuses
+        group by o.stock.id
+        order by min(o.submittedAt) asc
+        """)
+    List<Long> findStockIdsByStatusInOrderByEarliestSubmittedAt(
+        @Param("statuses") Collection<OrderStatus> statuses
+    );
 
     @Query("""
         select new com.papertrade.paper_trading.Repository.OrderRepository$MatchableOrder(o.id, o.submittedAt)

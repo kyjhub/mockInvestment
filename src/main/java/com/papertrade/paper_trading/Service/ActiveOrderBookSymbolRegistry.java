@@ -8,6 +8,8 @@ import com.papertrade.paper_trading.Repository.StockRepository;
 import com.papertrade.paper_trading.WebSocket.OrderBookSubscriptionRegistry;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -70,19 +72,32 @@ public class ActiveOrderBookSymbolRegistry {
         return List.copyOf(ordered);
     }
 
-    /** 미체결 주문이 있는 종목. DB 기준이라 인스턴스와 무관하게 전역이다. */
+    /**
+     * 미체결 주문이 있는 종목을 가장 먼저 접수된 주문 시각 순으로. DB 기준이라 인스턴스와 무관하게 전역이다.
+     *
+     * <p>이 순서가 WebSocket 실시간 호가 정원을 누가 차지할지 정한다. 밀려난 종목은 REST 폴링으로
+     * 가므로 갱신이 크게 느려진다. 먼저 낸 주문이 먼저 기회를 받게 한다.
+     */
     public List<String> pendingOrderSymbols() {
-        List<Long> stockIds = orderRepository.findDistinctStockIdsByStatusIn(MATCHABLE_STATUSES);
+        List<Long> stockIds = orderRepository.findStockIdsByStatusInOrderByEarliestSubmittedAt(MATCHABLE_STATUSES);
         if (stockIds.isEmpty()) {
             return List.of();
         }
 
-        List<String> symbols = new ArrayList<>();
         // 종목별 findById 반복은 N+1이 된다. 폴링과 WebSocket 배정이 주기적으로 호출하므로 한 번에 조회한다.
+        Map<Long, String> symbolByStockId = new HashMap<>();
         for (Stock stock : stockRepository.findAllById(stockIds)) {
-            symbols.add(stock.getSymbol());
+            symbolByStockId.put(stock.getId(), stock.getSymbol());
         }
-        Collections.sort(symbols);
+
+        // findAllById는 입력 순서를 보장하지 않는다. 접수 시각 순을 잃지 않도록 되돌린다.
+        List<String> symbols = new ArrayList<>();
+        for (Long stockId : stockIds) {
+            String symbol = symbolByStockId.get(stockId);
+            if (symbol != null) {
+                symbols.add(symbol);
+            }
+        }
         return symbols;
     }
 
