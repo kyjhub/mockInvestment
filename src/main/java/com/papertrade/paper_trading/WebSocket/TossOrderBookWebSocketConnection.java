@@ -36,6 +36,7 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
     private final TossWebSocketProperties properties;
     private final TossAccessTokenProvider accessTokenProvider;
     private final OrderBookService orderBookService;
+    private final RejectedWebSocketSymbolRegistry rejectedSymbolRegistry;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
 
@@ -44,6 +45,8 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
     private final Set<String> rejectedSymbols = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean connecting = new AtomicBoolean(false);
 
+    /** 슬롯을 잃어 폐기된 연결. 늦게 완료되는 비동기 접속을 걸러내는 데 쓴다. */
+    private volatile boolean closed;
     private volatile WebSocket webSocket;
     private volatile List<String> declaredSymbols = List.of();
     private volatile List<String> desiredSymbols = List.of();
@@ -57,6 +60,7 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
         TossWebSocketProperties properties,
         TossAccessTokenProvider accessTokenProvider,
         OrderBookService orderBookService,
+        RejectedWebSocketSymbolRegistry rejectedSymbolRegistry,
         ObjectMapper objectMapper,
         HttpClient httpClient
     ) {
@@ -64,6 +68,7 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
         this.properties = properties;
         this.accessTokenProvider = accessTokenProvider;
         this.orderBookService = orderBookService;
+        this.rejectedSymbolRegistry = rejectedSymbolRegistry;
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
     }
@@ -74,7 +79,7 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
 
     /** 연결이 없으면 백오프를 지켰는지 확인하고 연결한다. */
     public void ensureConnected() {
-        if (webSocket != null || connecting.get()) {
+        if (closed || webSocket != null || connecting.get()) {
             return;
         }
         if (System.currentTimeMillis() < nextConnectAttemptAt) {
@@ -90,6 +95,14 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
                 .buildAsync(URI.create(properties.url()), this)
                 .whenComplete((socket, throwable) -> {
                     connecting.set(false);
+                    if (socket != null && closed) {
+                        // 접속이 완료되기 전에 슬롯을 잃었다. 그대로 두면 매니저가 추적하지 않는
+                        // 소켓이 살아남아 계정당 연결 한도를 먹고 다른 서버의 연결을 밀어낸다.
+                        log.info("Discarding late Toss WebSocket connection. slot={}", slotIndex);
+                        webSocket = null;
+                        closeQuietly(socket);
+                        return;
+                    }
                     if (throwable != null) {
                         log.warn("Toss WebSocket connect failed. slot={}", slotIndex, throwable);
                         scheduleReconnect();
@@ -150,15 +163,21 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
         }
     }
 
+    /** 슬롯을 잃었을 때 호출한다. 이후 이 객체는 재사용하지 않는다. */
     public void close() {
+        closed = true;
         WebSocket socket = webSocket;
         webSocket = null;
         declaredSymbols = List.of();
+        // 재연결 전에 쓰던 연결을 먼저 닫아야 밀어내기가 반복되지 않는다.
+        closeQuietly(socket);
+    }
+
+    private void closeQuietly(WebSocket socket) {
         if (socket == null) {
             return;
         }
         try {
-            // 재연결 전에 쓰던 연결을 먼저 닫아야 밀어내기가 반복되지 않는다.
             socket.sendClose(WebSocket.NORMAL_CLOSURE, "slot released");
         } catch (RuntimeException ignored) {
         }
@@ -184,6 +203,10 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
 
     @Override
     public void onOpen(WebSocket socket) {
+        if (closed) {
+            closeQuietly(socket);
+            return;
+        }
         this.webSocket = socket;
         socket.request(1);
     }
@@ -273,6 +296,8 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
             String symbol = symbolFromTopic(rejected.path("target").asText(""));
             if (symbol != null) {
                 rejectedSymbols.add(symbol);
+                // 슬롯을 소유하지 않은 인스턴스도 폴링 여부를 판단해야 하므로 공유한다.
+                rejectedSymbolRegistry.markRejected(symbol);
                 log.warn(
                     "Toss WebSocket subscription rejected. slot={}, symbol={}, code={}",
                     slotIndex,
@@ -318,6 +343,9 @@ public class TossOrderBookWebSocketConnection implements WebSocket.Listener {
     }
 
     private void scheduleReconnect() {
+        if (closed) {
+            return;
+        }
         consecutiveFailures = Math.min(consecutiveFailures + 1, 30);
         long backoff = Math.min(MAX_BACKOFF_MILLIS, BASE_BACKOFF_MILLIS * (1L << (consecutiveFailures - 1)));
         long jitter = ThreadLocalRandom.current().nextLong(backoff + 1L);

@@ -2,6 +2,7 @@ package com.papertrade.paper_trading.WebSocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.papertrade.paper_trading.Client.TossAccessTokenProvider;
+import com.papertrade.paper_trading.Config.SchedulingConfig;
 import com.papertrade.paper_trading.Config.TossWebSocketProperties;
 import com.papertrade.paper_trading.Service.ActiveOrderBookSymbolRegistry;
 import com.papertrade.paper_trading.Service.OrderBookService;
@@ -33,6 +34,7 @@ public class TossOrderBookWebSocketManager {
     private final TossAccessTokenProvider accessTokenProvider;
     private final ActiveOrderBookSymbolRegistry activeSymbolRegistry;
     private final OrderBookService orderBookService;
+    private final RejectedWebSocketSymbolRegistry rejectedSymbolRegistry;
     private final ObjectMapper objectMapper;
 
     private static final long SYMBOL_RECOMPUTE_INTERVAL_MILLIS = 1_000L;
@@ -46,7 +48,10 @@ public class TossOrderBookWebSocketManager {
     private volatile long symbolsComputedAt;
 
     /** 슬롯을 잡거나 유지한다. 한 인스턴스가 두 슬롯을 다 잡아도 된다 — 인스턴스가 하나뿐일 때 필요하다. */
-    @Scheduled(fixedDelayString = "${toss-invest.websocket.slot-heartbeat-ms:5000}")
+    @Scheduled(
+        scheduler = SchedulingConfig.WEBSOCKET_SCHEDULER,
+        fixedDelayString = "${toss-invest.websocket.slot-heartbeat-ms:5000}"
+    )
     public void manageSlots() {
         if (!properties.enabled()) {
             releaseAll();
@@ -70,13 +75,16 @@ public class TossOrderBookWebSocketManager {
     }
 
     /** 담당 종목 재계산 + 변경 시 재선언. 이 주기가 곧 선언 디바운스다. */
-    @Scheduled(fixedDelayString = "${toss-invest.websocket.declare-debounce-ms:250}")
+    @Scheduled(
+        scheduler = SchedulingConfig.WEBSOCKET_SCHEDULER,
+        fixedDelayString = "${toss-invest.websocket.declare-debounce-ms:250}"
+    )
     public void refreshSubscriptions() {
         if (!properties.enabled() || connections.isEmpty()) {
             return;
         }
 
-        List<String> assigned = coveredSymbols();
+        List<String> assigned = assignedSymbols();
         for (Map.Entry<Integer, TossOrderBookWebSocketConnection> entry : connections.entrySet()) {
             TossOrderBookWebSocketConnection connection = entry.getValue();
             connection.setDesiredSymbols(symbolsForSlot(assigned, entry.getKey()));
@@ -87,21 +95,19 @@ public class TossOrderBookWebSocketManager {
     }
 
     /**
-     * WebSocket이 채워주기로 한 종목. 폴링 제외 판단에 쓰인다.
+     * 슬롯에 배정할 종목. <b>거절 여부로 거르지 않는다.</b>
      *
-     * <p>주의: 이건 "배정하려는 종목"이지 "실제로 프레임을 받고 있는 종목"이 아니다.
-     * 연결이 끊긴 동안에도 covered로 남는 것은 의도한 동작으로, 캐시가 신선도 임계값을 넘기면
-     * 폴링이 자동으로 폴백한다. 다만 구독이 거절된 종목({@code stock-not-found} 등)은
-     * WebSocket이 영원히 채우지 않으므로 제외한다.
-     *
-     * <p>계산이 DB 조회를 동반하므로 결과를 캐싱한다. 폴링과 선언 틱이 모두 이 값을 쓴다.
+     * <p>거절 정보는 슬롯을 소유한 인스턴스만 아는데, 그것으로 목록을 먼저 걸러버리면
+     * 서버마다 목록 길이가 달라져 인덱스 홀짝 배정이 어긋난다. 그러면 어떤 종목은 두 연결이
+     * 중복 구독하고 어떤 종목은 아무도 구독하지 않는다. 그래서 배정은 모든 인스턴스가
+     * 동일하게 계산할 수 있는 원본 목록으로 하고, 거절된 종목은 각 연결이 자기 선언에서만 뺀다.
      */
-    public List<String> coveredSymbols() {
+    private List<String> assignedSymbols() {
         long now = System.currentTimeMillis();
         if (now - symbolsComputedAt < SYMBOL_RECOMPUTE_INTERVAL_MILLIS && cachedSymbols != null) {
             return cachedSymbols;
         }
-        cachedSymbols = computeCoveredSymbols();
+        cachedSymbols = computeAssignedSymbols();
         symbolsComputedAt = now;
         return cachedSymbols;
     }
@@ -110,26 +116,32 @@ public class TossOrderBookWebSocketManager {
      * 전역 활성 종목 중 우선순위 상위 {@code maxSymbols()}개.
      * 이 목록에 들어가면 실시간 푸시를 받고, 밀려나면 REST 폴링으로 처리된다.
      */
-    private List<String> computeCoveredSymbols() {
+    private List<String> computeAssignedSymbols() {
         if (!properties.enabled()) {
             return List.of();
         }
 
-        Set<String> rejected = rejectedSymbols();
-        List<String> ordered = activeSymbolRegistry.orderedActiveSymbols().stream()
-            .filter(symbol -> !rejected.contains(symbol))
-            .toList();
+        List<String> ordered = activeSymbolRegistry.orderedActiveSymbols();
         int limit = Math.min(ordered.size(), properties.maxSymbols());
         return List.copyOf(ordered.subList(0, limit));
     }
 
-    /** 구독이 거절된 종목. 원인을 고치기 전엔 재선언해도 계속 거부되므로 담당 대상에서 뺀다. */
-    private Set<String> rejectedSymbols() {
-        Set<String> rejected = new HashSet<>();
-        for (TossOrderBookWebSocketConnection connection : connections.values()) {
-            rejected.addAll(connection.rejectedSymbols());
+    /**
+     * WebSocket이 실제로 채워줄 종목. 폴링 제외 판단에 쓰인다.
+     *
+     * <p>주의: 이건 "배정된 종목"이지 "지금 프레임을 받고 있는 종목"이 아니다.
+     * 연결이 끊긴 동안에도 covered로 남는 것은 의도한 동작으로, 캐시가 신선도 임계값을 넘기면
+     * 폴링이 자동으로 폴백한다. 다만 구독이 거절된 종목은 WebSocket이 채우지 않으므로 제외해야
+     * REST 폴링이 가져간다. 거절 정보는 슬롯 소유자만 알기 때문에 Redis로 공유한다.
+     */
+    public List<String> coveredSymbols() {
+        Set<String> rejected = rejectedSymbolRegistry.rejectedSymbols();
+        if (rejected.isEmpty()) {
+            return assignedSymbols();
         }
-        return rejected;
+        return assignedSymbols().stream()
+            .filter(symbol -> !rejected.contains(symbol))
+            .toList();
     }
 
     /** 실제로 이 인스턴스가 구독을 선언해 둔 종목. 폴링 제외 판단이 아니라 관측용이다. */
@@ -161,6 +173,7 @@ public class TossOrderBookWebSocketManager {
             properties,
             accessTokenProvider,
             orderBookService,
+            rejectedSymbolRegistry,
             objectMapper,
             httpClient
         );

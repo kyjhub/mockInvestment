@@ -16,6 +16,7 @@ public class SchedulingConfig {
 
     public static final String MARKET_DATA_POLLING_SCHEDULER = "marketDataPollingScheduler";
     public static final String DIRTY_DRAIN_SCHEDULER = "dirtyDrainScheduler";
+    public static final String WEBSOCKET_SCHEDULER = "webSocketScheduler";
 
     /**
      * {@link org.springframework.scheduling.config.TaskSchedulerRouter}가 스케줄러를 찾을 때 쓰는 기본 빈 이름.
@@ -53,11 +54,28 @@ public class SchedulingConfig {
 
     /**
      * 매칭을 수행하므로 DB 커넥션을 점유한다.
-     * 풀 크기는 HikariCP 최대 커넥션 수를 넘지 않도록 커넥션 풀 설정과 함께 조정해야 한다.
+     *
+     * <p>드레인은 {@code fixedDelay} 작업 하나뿐이고 같은 작업은 자기 자신과 겹치지 않으므로,
+     * 풀을 키워도 한 인스턴스에서 드레인이 동시에 두 개 돌지는 <b>않는다</b>. 이 풀의 목적은
+     * 병렬 처리가 아니라 <b>다른 스케줄 작업과의 격리</b>이며, 그래서 1이면 충분하다.
+     * 실제 병렬 매칭이 필요해지면 드레인이 SPOP만 하고 종목별 작업을 별도 executor에 넘기는 구조로 바꿔야 한다.
      */
     @Bean(DIRTY_DRAIN_SCHEDULER)
     public TaskScheduler dirtyDrainScheduler() {
         return threadPoolTaskScheduler(dirtyDrainPoolSize, "dirty-drain-");
+    }
+
+    /**
+     * WebSocket 슬롯 관리와 구독 갱신 전용.
+     *
+     * <p>{@code TossOrderBookWebSocketManager}는 연결 생성·해제와 구독 선언이 직렬로 일어난다고 보고 짜여 있다.
+     * 기본 풀(4스레드)에 두면 {@code manageSlots()}와 {@code refreshSubscriptions()}가 동시에 돌아서,
+     * 슬롯을 잃어 연결을 닫는 도중 다른 스레드가 같은 연결에 접속을 시작하는 경합이 생긴다.
+     * 그래서 <b>반드시 단일 스레드</b>여야 한다.
+     */
+    @Bean(WEBSOCKET_SCHEDULER)
+    public TaskScheduler webSocketScheduler() {
+        return threadPoolTaskScheduler(1, "toss-ws-");
     }
 
     private TaskScheduler threadPoolTaskScheduler(int poolSize, String threadNamePrefix) {
