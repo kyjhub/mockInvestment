@@ -237,7 +237,7 @@ SUBSCRIBE /topic/orderbook/{symbol}
 4. Toss 호가 API를 호출한다.
 5. 최신 응답을 Redis에 저장한다.
 6. 이전 값과 asks, bids, currency를 비교한다.
-7. 실제 호가가 달라졌다면 version 증가, Pub/Sub 발행, 매칭 Stream 발행을 수행한다.
+7. 실제 호가가 달라졌다면 Pub/Sub 발행과 매칭 트리거 등록을 수행한다.
 
 기본 cache TTL은 30초다.
 
@@ -248,16 +248,20 @@ SUBSCRIBE /topic/orderbook/{symbol}
 호가가 변경되면 다음 세 동작이 연결된다.
 
 ```text
-orderbook:version:{symbol} INCR
-        |
-        +--> orderbook:updates Pub/Sub
-        |       `--> /topic/orderbook/{symbol}
-        |
-        `--> symbols:match-requested Stream
-                reason=ORDER_BOOK_UPDATED
+orderbook:updates Pub/Sub
+        `--> /topic/orderbook/{symbol}
+
+orderbook:dirty SADD {symbol}
+        `--> dirty drain scheduler --> 종목 매칭
 ```
 
-Pub/Sub는 화면 갱신용이고, Redis Stream은 체결 기회를 보존하는 매칭 트리거다.
+Pub/Sub는 화면 갱신용이라 모든 변경을 그대로 전달한다. 매칭 트리거는 성격이 달라 Redis Set에 모은다 —
+필요한 정보는 "이 종목을 봐야 한다"는 사실 하나뿐이라 횟수를 보존할 이유가 없기 때문이다.
+WebSocket 푸시는 종목당 초당 7회 안팎이라 Stream(append-only)에 넣으면 소비 능력을 넘겨 백로그가 쌓이지만,
+Set은 같은 종목을 한 번만 담으므로 저장 크기가 푸시 횟수에 비례해 늘지 않는다.
+
+`ORDER_SUBMITTED`와 `SAFETY_NET`은 유실되면 주문이 지연되므로 at-least-once와 PEL 복구가 필요하고,
+그래서 계속 `symbols:match-requested` Stream을 쓴다.
 
 ### 7.4 호가 폴링
 
@@ -474,29 +478,32 @@ Publisher는 `MAXLEN` approximate trimming을 적용한다. 기본 source Stream
 
 1. bootstrap 레코드처럼 `symbol`이 없으면 ACK한다.
 2. symbol payload를 검증한다.
-3. `order-match-lock:{symbol}` 분산 락을 획득한다.
-4. 호가 version이 안정될 때까지 종목 전체를 매칭한다.
-5. 성공하면 레코드를 ACK하고 재시도 횟수를 제거한다.
-6. 마지막에 token 일치 Lua script로 종목 락을 해제한다.
+3. `reason`이 `ORDER_BOOK_UPDATED`면 매칭하지 않고 dirty set에 넘긴 뒤 ACK한다.
+4. 그 외에는 `SymbolMatchingProcessor`가 `order-match-lock:{symbol}` 분산 락을 획득한다.
+5. 종목 전체를 한 번 매칭한다.
+6. 성공하거나 예산이 부족하면 ACK하고 재시도 횟수를 제거한다. 락 경합이면 ACK하지 않고 dirty set에 등록한다.
+7. 마지막에 token 일치 Lua script로 종목 락을 해제한다.
 
 종목 락 기본 TTL은 15초다. 락 token이 현재 Redis 값과 일치하는 경우에만 삭제하므로, 만료 후 다른 작업이 획득한 락을 이전 작업이 삭제하지 않는다.
 
-### 12.4 호가 version 안정화
+### 12.4 매칭 실행 경로
 
-종목 매칭은 다음 loop를 사용한다.
+종목 락 획득부터 해제까지는 `SymbolMatchingProcessor`가 담당하고, Stream 컨슈머와 dirty drain 스케줄러가
+같은 경로를 공유한다. 락이 이 클래스 안에 있으므로 `matchSymbol()`을 직접 호출하면 안 된다 —
+락 없이 매칭하면 다중 인스턴스에서 중복 체결이 발생한다.
 
-```text
-versionBefore = orderbook:version:{symbol}
-dailyPriceRange = latest cache or Toss response
-matchSymbol(symbol, dailyPriceRange)
-versionAfter = orderbook:version:{symbol}
+결과는 예외가 아니라 값으로 돌려주고 호출자가 다르게 처리한다.
 
-versionBefore != versionAfter 이면 즉시 다시 수행
-```
+| 결과 | Stream consumer | Dirty drainer |
+|---|---|---|
+| `SUCCESS` | ACK | 종료 |
+| `QUOTA_UNAVAILABLE` | ACK + 재시도 횟수 제거 | 재등록하지 않음 (hot loop 방지) |
+| `LOCK_BUSY` | ACK 안 함(PEL 유지) + dirty set 등록 | dirty set 재등록 |
+| 예외 전파 | 재시도 → DLQ | 로그 + 카운터 |
 
-호가 자체는 더 이상 스윕 시작 시점에 한 번만 가져오지 않는다. `matchSymbol()`이 주문별로 필요한 시점에 개별적으로 가져오며, 그 방식은 §13.1 "호가 신선도 보장"을 참고한다.
-
-종목 스윕 도중 새 호가가 도착한 경우 다음 1초 polling tick을 기다리지 않고 최신 호가로 한 번 더 매칭하기 위한 구조다.
+이전에는 호가 version(`orderbook:version:{symbol}`)이 안정될 때까지 매칭을 반복하는 loop가 있었으나 제거했다.
+호가가 바뀌면 그 변경이 스스로 다음 트리거를 만들므로 중복이었고, 처리 시간이 시장 변동성에 비례해 늘어나
+가장 바쁜 순간에 종목 락을 가장 오래 붙잡는 구조였다.
 
 ### 12.5 API 예산 부족 처리
 
