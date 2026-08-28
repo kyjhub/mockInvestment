@@ -12,6 +12,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ import org.springframework.stereotype.Service;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ActiveOrderBookSymbolRegistry {
 
     private static final String ACTIVE_SYMBOLS_KEY = "orderbook:active-symbols";
@@ -36,6 +38,9 @@ public class ActiveOrderBookSymbolRegistry {
     private final StockRepository stockRepository;
     private final StringRedisTemplate stringRedisTemplate;
     private final OrderBookActiveSymbolProperties properties;
+
+    /** Redis를 못 읽는 동안 인스턴스 간 목록이 갈리지 않도록 마지막 성공값을 유지한다. */
+    private volatile List<String> lastKnownSubscribedSymbols = List.of();
 
     /** 이 인스턴스의 구독 종목을 전역 집합에 등록한다. score는 마지막으로 살아있음을 알린 시각. */
     @Scheduled(fixedDelayString = "${orderbook.active-symbols.refresh-ms:5000}")
@@ -90,16 +95,20 @@ public class ActiveOrderBookSymbolRegistry {
                 Double.POSITIVE_INFINITY
             );
             if (symbols == null || symbols.isEmpty()) {
+                lastKnownSubscribedSymbols = List.of();
                 return List.of();
             }
             List<String> sorted = new ArrayList<>(symbols);
             Collections.sort(sorted);
-            return sorted;
-        } catch (RuntimeException ignored) {
-            // Redis를 못 읽으면 최소한 이 인스턴스가 아는 것만이라도 돌려준다.
-            List<String> local = new ArrayList<>(subscriptionRegistry.activeSymbols());
-            Collections.sort(local);
-            return local;
+            lastKnownSubscribedSymbols = List.copyOf(sorted);
+            return lastKnownSubscribedSymbols;
+        } catch (RuntimeException e) {
+            // 이 인스턴스가 아는 구독만 돌려주면 인스턴스마다 목록이 갈린다.
+            // 그러면 WebSocket 슬롯 배정과 폴링 판단이 서버마다 어긋나므로, 마지막으로 성공한
+            // 전역 목록을 그대로 유지한다. Redis가 죽은 동안 구독 목록이 조금 낡는 편이
+            // 서버마다 다른 목록으로 갈라지는 것보다 낫다.
+            log.warn("Failed to read active order book symbols; keeping last known value", e);
+            return lastKnownSubscribedSymbols;
         }
     }
 }

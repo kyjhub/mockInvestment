@@ -134,28 +134,42 @@ public class TossOrderBookWebSocketManager {
     }
 
     /**
-     * 슬롯이 담당할 종목을 고른다.
+     * 슬롯이 담당할 종목을 고른다. 소유권은 <b>목록에서의 위치가 아니라 종목 이름</b>이 정한다.
      *
-     * <p>각 슬롯은 전체 목록에서 <b>자기 인덱스 계열만</b> 훑는다(슬롯 2개면 짝수/홀수).
-     * 계열이 서로 겹치지 않으므로 <b>어떤 슬롯이 무엇을 거절로 건너뛰든 다른 슬롯과 중복될 수 없고</b>,
-     * 인스턴스마다 거절 정보가 달라도 마찬가지다. 슬롯 간 조율 없이 중복과 누락이 동시에 막힌다.
+     * <p>위치 기반(인덱스 홀짝)으로 나누면 모든 인스턴스의 목록이 완전히 같아야만 성립한다.
+     * 실제로는 구독·주문이 추가되는 시점 차이나 Redis 장애로 목록이 갈릴 수 있고, 그러면
+     * 같은 위치가 서로 다른 종목을 가리켜 중복 구독과 누락이 동시에 발생한다.
      *
-     * <p>거절된 종목은 건너뛰고 자기 계열에서 다음 종목을 당겨온다. 이렇게 하지 않으면
-     * 거절된 종목이 배정 자리만 차지해 슬롯이 한도보다 적게 채워진다.
+     * <pre>
+     * 서버1 slot0, 목록 [B,C,D]   -> 위치 0,2 -> B, D
+     * 서버2 slot1, 목록 [A,B,C,D] -> 위치 1,3 -> B, D
+     * 결과: B·D 중복, A·C 누락
+     * </pre>
      *
-     * <p>해시 샤딩을 쓰지 않는 이유는 한쪽에 몰려 연결당 구독 한도를 넘길 수 있기 때문이다.
+     * <p>종목 이름으로 소유 슬롯을 정하면 목록이 달라도 같은 종목은 언제나 같은 슬롯에 속하므로
+     * <b>중복 구독이 구조적으로 불가능</b>하다. {@code String.hashCode()}는 명세로 고정된 값이라
+     * JVM이나 인스턴스가 달라도 동일하다.
+     *
+     * <p>한 슬롯에 몰려 연결당 한도를 넘으면 우선순위 상위부터 자르고 나머지는 REST 폴링이 가져간다.
+     * 한도를 넘기면 토스가 선언 전체를 {@code too-many-topics}로 거부하기 때문에 자르는 쪽이 안전하다.
      */
-    // 배정 불변식(슬롯당 한도 준수, 중복 없음, 누락 없음)을 테스트에서 검증하기 위해 package-private.
+    // 배정 불변식(슬롯당 한도 준수, 중복 없음, 목록이 갈려도 중복 없음)을 테스트에서 검증하기 위해 package-private.
     List<String> symbolsForSlot(List<String> ordered, int slotIndex, Set<String> rejected) {
         List<String> symbols = new ArrayList<>();
         int limit = properties.maxSymbolsPerConnection();
-        for (int i = slotIndex; i < ordered.size() && symbols.size() < limit; i += properties.connectionSlots()) {
-            String symbol = ordered.get(i);
-            if (!rejected.contains(symbol)) {
+        for (String symbol : ordered) {
+            if (symbols.size() >= limit) {
+                break;
+            }
+            if (ownerSlot(symbol) == slotIndex && !rejected.contains(symbol)) {
                 symbols.add(symbol);
             }
         }
         return symbols;
+    }
+
+    private int ownerSlot(String symbol) {
+        return Math.floorMod(symbol.hashCode(), properties.connectionSlots());
     }
 
     private TossOrderBookWebSocketConnection newConnection(int slotIndex) {

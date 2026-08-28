@@ -25,6 +25,30 @@ class TossOrderBookWebSocketManagerTests {
     );
 
     @Test
+    void neverDuplicatesEvenWhenInstancesSeeDifferentSymbolLists() {
+        // 구독·주문 추가 시점 차이나 Redis 장애로 인스턴스마다 목록이 갈릴 수 있다.
+        // 위치(인덱스)로 슬롯을 나누면 같은 위치가 서로 다른 종목을 가리켜 중복과 누락이 함께 생긴다.
+        // 소유권이 종목 이름으로 정해지므로 목록이 달라도 중복은 구조적으로 불가능해야 한다.
+        List<String> serverOneView = List.of("B", "C", "D");
+        List<String> serverTwoView = List.of("A", "B", "C", "D");
+
+        List<String> slot0 = manager.symbolsForSlot(serverOneView, 0, Set.of());
+        List<String> slot1 = manager.symbolsForSlot(serverTwoView, 1, Set.of());
+
+        assertThat(slot0).doesNotContainAnyElementsOf(slot1);
+    }
+
+    @Test
+    void assignsEachSymbolToTheSameSlotRegardlessOfListContents() {
+        // 목록이 어떻게 바뀌든 한 종목의 소유 슬롯은 변하지 않아야 한다.
+        for (String symbol : symbols(50)) {
+            int fromFullList = slotOf(symbol, symbols(50));
+            int fromPartialList = slotOf(symbol, List.of(symbol));
+            assertThat(fromFullList).isEqualTo(fromPartialList);
+        }
+    }
+
+    @Test
     void splitsSymbolsAcrossSlotsWithoutOverlapOrLoss() {
         List<String> ordered = symbols(150);
 
@@ -51,40 +75,39 @@ class TossOrderBookWebSocketManagerTests {
     }
 
     @Test
-    void rejectedSymbolDoesNotLeaveAnEmptyAssignmentSlot() {
-        // 거절된 종목이 자리만 차지하면 슬롯이 한도보다 적게 채워지고 구독 정원이 낭비된다.
-        // 자기 계열에서 다음 종목을 당겨와 채워야 한다.
-        List<String> ordered = List.of("A", "B", "C", "D", "E", "F");
+    void skipsRejectedSymbolsWithoutAffectingOtherSlots() {
+        List<String> ordered = symbols(20);
+        String rejectedSymbol = ordered.get(0);
+        int owner = slotOf(rejectedSymbol, ordered);
 
-        assertThat(manager.symbolsForSlot(ordered, 0, Set.of())).containsExactly("A", "C", "E");
-        assertThat(manager.symbolsForSlot(ordered, 0, Set.of("A"))).containsExactly("C", "E");
+        assertThat(manager.symbolsForSlot(ordered, owner, Set.of())).contains(rejectedSymbol);
+        assertThat(manager.symbolsForSlot(ordered, owner, Set.of(rejectedSymbol))).doesNotContain(rejectedSymbol);
+
+        // 거절 정보는 슬롯 소유자만 안다. 다른 슬롯의 배정이 그 때문에 달라지면 안 된다.
+        int otherSlot = (owner + 1) % SLOTS;
+        assertThat(manager.symbolsForSlot(ordered, otherSlot, Set.of(rejectedSymbol)))
+            .isEqualTo(manager.symbolsForSlot(ordered, otherSlot, Set.of()));
     }
 
     @Test
-    void divergentRejectionKnowledgeStillProducesNoOverlapAndNoGap() {
-        // 거절 정보는 슬롯을 소유한 인스턴스만 안다. 서버마다 아는 내용이 달라도
-        // 각 슬롯은 자기 인덱스 계열만 훑으므로 중복도 누락도 생기지 않아야 한다.
-        List<String> ordered = List.of("A", "B", "C", "D", "E", "F");
+    void divergentRejectionKnowledgeStillProducesNoOverlap() {
+        List<String> ordered = symbols(20);
+        String rejectedSymbol = ordered.get(0);
 
-        // 서버1은 slot 0을 갖고 A가 거절된 것을 안다.
-        List<String> slot0 = manager.symbolsForSlot(ordered, 0, Set.of("A"));
-        // 서버2는 slot 1을 갖고 A 거절을 모른다.
+        // 서버1은 거절을 알고, 서버2는 모른다.
+        List<String> slot0 = manager.symbolsForSlot(ordered, 0, Set.of(rejectedSymbol));
         List<String> slot1 = manager.symbolsForSlot(ordered, 1, Set.of());
 
         assertThat(slot0).doesNotContainAnyElementsOf(slot1);
-
-        List<String> union = new ArrayList<>(slot0);
-        union.addAll(slot1);
-        // 거절된 A만 빠지고 나머지는 정확히 한 번씩 구독된다.
-        assertThat(union).containsExactlyInAnyOrder("B", "C", "D", "E", "F");
     }
 
-    @Test
-    void handlesFewerSymbolsThanSlots() {
-        List<String> ordered = List.of("AAPL");
-
-        assertThat(manager.symbolsForSlot(ordered, 0, Set.of())).containsExactly("AAPL");
-        assertThat(manager.symbolsForSlot(ordered, 1, Set.of())).isEmpty();
+    private int slotOf(String symbol, List<String> ordered) {
+        for (int slotIndex = 0; slotIndex < SLOTS; slotIndex++) {
+            if (manager.symbolsForSlot(ordered, slotIndex, Set.of()).contains(symbol)) {
+                return slotIndex;
+            }
+        }
+        throw new IllegalStateException("어떤 슬롯에도 배정되지 않았다: " + symbol);
     }
 
     private List<String> symbols(int count) {
