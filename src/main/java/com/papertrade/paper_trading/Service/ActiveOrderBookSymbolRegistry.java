@@ -8,10 +8,13 @@ import com.papertrade.paper_trading.Repository.StockRepository;
 import com.papertrade.paper_trading.WebSocket.OrderBookSubscriptionRegistry;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -23,6 +26,7 @@ import org.springframework.stereotype.Service;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ActiveOrderBookSymbolRegistry {
 
     private static final String ACTIVE_SYMBOLS_KEY = "orderbook:active-symbols";
@@ -36,6 +40,9 @@ public class ActiveOrderBookSymbolRegistry {
     private final StockRepository stockRepository;
     private final StringRedisTemplate stringRedisTemplate;
     private final OrderBookActiveSymbolProperties properties;
+
+    /** Redis를 못 읽는 동안 인스턴스 간 목록이 갈리지 않도록 마지막 성공값을 유지한다. */
+    private volatile List<String> lastKnownSubscribedSymbols = List.of();
 
     /** 이 인스턴스의 구독 종목을 전역 집합에 등록한다. score는 마지막으로 살아있음을 알린 시각. */
     @Scheduled(fixedDelayString = "${orderbook.active-symbols.refresh-ms:5000}")
@@ -65,19 +72,32 @@ public class ActiveOrderBookSymbolRegistry {
         return List.copyOf(ordered);
     }
 
-    /** 미체결 주문이 있는 종목. DB 기준이라 인스턴스와 무관하게 전역이다. */
+    /**
+     * 미체결 주문이 있는 종목을 가장 먼저 접수된 주문 시각 순으로. DB 기준이라 인스턴스와 무관하게 전역이다.
+     *
+     * <p>이 순서가 WebSocket 실시간 호가 정원을 누가 차지할지 정한다. 밀려난 종목은 REST 폴링으로
+     * 가므로 갱신이 크게 느려진다. 먼저 낸 주문이 먼저 기회를 받게 한다.
+     */
     public List<String> pendingOrderSymbols() {
-        List<Long> stockIds = orderRepository.findDistinctStockIdsByStatusIn(MATCHABLE_STATUSES);
+        List<Long> stockIds = orderRepository.findStockIdsByStatusInOrderByEarliestSubmittedAt(MATCHABLE_STATUSES);
         if (stockIds.isEmpty()) {
             return List.of();
         }
 
-        List<String> symbols = new ArrayList<>();
         // 종목별 findById 반복은 N+1이 된다. 폴링과 WebSocket 배정이 주기적으로 호출하므로 한 번에 조회한다.
+        Map<Long, String> symbolByStockId = new HashMap<>();
         for (Stock stock : stockRepository.findAllById(stockIds)) {
-            symbols.add(stock.getSymbol());
+            symbolByStockId.put(stock.getId(), stock.getSymbol());
         }
-        Collections.sort(symbols);
+
+        // findAllById는 입력 순서를 보장하지 않는다. 접수 시각 순을 잃지 않도록 되돌린다.
+        List<String> symbols = new ArrayList<>();
+        for (Long stockId : stockIds) {
+            String symbol = symbolByStockId.get(stockId);
+            if (symbol != null) {
+                symbols.add(symbol);
+            }
+        }
         return symbols;
     }
 
@@ -90,16 +110,20 @@ public class ActiveOrderBookSymbolRegistry {
                 Double.POSITIVE_INFINITY
             );
             if (symbols == null || symbols.isEmpty()) {
+                lastKnownSubscribedSymbols = List.of();
                 return List.of();
             }
             List<String> sorted = new ArrayList<>(symbols);
             Collections.sort(sorted);
-            return sorted;
-        } catch (RuntimeException ignored) {
-            // Redis를 못 읽으면 최소한 이 인스턴스가 아는 것만이라도 돌려준다.
-            List<String> local = new ArrayList<>(subscriptionRegistry.activeSymbols());
-            Collections.sort(local);
-            return local;
+            lastKnownSubscribedSymbols = List.copyOf(sorted);
+            return lastKnownSubscribedSymbols;
+        } catch (RuntimeException e) {
+            // 이 인스턴스가 아는 구독만 돌려주면 인스턴스마다 목록이 갈린다.
+            // 그러면 WebSocket 슬롯 배정과 폴링 판단이 서버마다 어긋나므로, 마지막으로 성공한
+            // 전역 목록을 그대로 유지한다. Redis가 죽은 동안 구독 목록이 조금 낡는 편이
+            // 서버마다 다른 목록으로 갈라지는 것보다 낫다.
+            log.warn("Failed to read active order book symbols; keeping last known value", e);
+            return lastKnownSubscribedSymbols;
         }
     }
 }

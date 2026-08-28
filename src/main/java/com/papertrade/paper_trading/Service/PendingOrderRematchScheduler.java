@@ -24,7 +24,7 @@ public class PendingOrderRematchScheduler {
 
     @Scheduled(fixedDelayString = "${matching-engine.rematch.fixed-delay-ms:30000}")
     public void rematchPendingOrders() {
-        for (Long stockId : orderRepository.findDistinctStockIdsByStatusIn(MATCHABLE_STATUSES)) {
+        for (Long stockId : orderRepository.findStockIdsByStatusInOrderByEarliestSubmittedAt(MATCHABLE_STATUSES)) {
             stockRepository.findById(stockId).ifPresent(stock ->
                 symbolMatchRequestedStreamPublisher.publish(
                     new SymbolMatchRequestedEvent(stock.getSymbol(), "SAFETY_NET")

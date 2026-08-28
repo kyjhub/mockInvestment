@@ -37,6 +37,10 @@ public class TossWebSocketProperties {
     @Value("${toss-invest.websocket.slot-heartbeat-ms:5000}")
     private long slotHeartbeatMs;
 
+    /** 거절된 종목을 다시 시도하기까지의 시간. 종목 마스터에 뒤늦게 등록되는 경우가 있어 영구 제외하지 않는다. */
+    @Value("${toss-invest.websocket.rejected-symbol-ttl-ms:600000}")
+    private long rejectedSymbolTtlMs;
+
     public boolean enabled() {
         return enabled;
     }
@@ -71,6 +75,10 @@ public class TossWebSocketProperties {
 
     public long slotHeartbeatMs() {
         return slotHeartbeatMs;
+    }
+
+    public long rejectedSymbolTtlMs() {
+        return rejectedSymbolTtlMs;
     }
 
     public int maxSymbols() {
