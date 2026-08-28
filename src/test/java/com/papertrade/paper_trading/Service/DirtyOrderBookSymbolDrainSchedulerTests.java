@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,8 +29,11 @@ class DirtyOrderBookSymbolDrainSchedulerTests {
 
     @BeforeEach
     void setUp() {
-        scheduler = new DirtyOrderBookSymbolDrainScheduler(dirtyRegistry, activeRegistry, processor);
+        scheduler = new DirtyOrderBookSymbolDrainScheduler(
+            dirtyRegistry, activeRegistry, processor, new SimpleMeterRegistry()
+        );
         setBatchSize(scheduler, 20L);
+        scheduler.registerMeters();
         when(activeRegistry.pendingOrderSymbols()).thenReturn(List.of("AAPL", "TSLA", "NVDA"));
     }
 
@@ -85,6 +89,19 @@ class DirtyOrderBookSymbolDrainSchedulerTests {
 
         verify(processor).process("AAPL");
         verify(processor, never()).process("MSFT");
+    }
+
+    @Test
+    void requeuesPoppedSymbolsWhenPendingOrderLookupFails() {
+        // SPOP은 이미 집합에서 제거했다. 여기서 그냥 빠지면 batch 전체가 조용히 사라진다.
+        when(dirtyRegistry.pop(anyLong())).thenReturn(List.of("AAPL", "TSLA"));
+        when(activeRegistry.pendingOrderSymbols()).thenThrow(new IllegalStateException("DB connection lost"));
+
+        scheduler.drain();
+
+        verify(dirtyRegistry).markDirty("AAPL");
+        verify(dirtyRegistry).markDirty("TSLA");
+        verify(processor, never()).process(anyString());
     }
 
     private void setBatchSize(DirtyOrderBookSymbolDrainScheduler target, long value) {

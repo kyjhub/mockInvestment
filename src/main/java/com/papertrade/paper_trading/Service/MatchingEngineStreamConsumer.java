@@ -39,6 +39,8 @@ public class MatchingEngineStreamConsumer {
     private final SymbolMatchingProcessor symbolMatchingProcessor;
     private final DirtyOrderBookSymbolRegistry dirtySymbolRegistry;
 
+    // backlog를 빠르게 배출해야 할 때는 이 값을 일시적으로 크게 잡는다.
+    // 기본값 10 × 100ms 주기면 인스턴스당 초당 약 100건이라 대량 backlog는 몇 시간이 걸린다.
     @Value("${matching-engine.stream.batch-size:10}")
     private int batchSize;
 
@@ -138,7 +140,8 @@ public class MatchingEngineStreamConsumer {
         }
     }
 
-    private void processRecord(MapRecord<String, Object, Object> record) {
+    // 레코드 종류별 ACK/재등록 정책을 테스트에서 검증하기 위해 package-private.
+    void processRecord(MapRecord<String, Object, Object> record) {
         Map<Object, Object> value = record.getValue();
         if (!value.containsKey("symbol")) {
             acknowledge(record);
@@ -156,8 +159,11 @@ public class MatchingEngineStreamConsumer {
             return;
         }
 
-        // 호가 트리거는 dirty set이 담당한다. 배포 전에 쌓인 backlog는 매칭 없이 배출만 한다.
+        // 호가 트리거는 dirty set이 담당한다. 여기서 매칭하지 않고 배출만 한다.
+        // 단순히 버리지 않고 dirty set에 넘기는 이유는, 롤링 배포 중 구버전 인스턴스가 발행한
+        // 트리거가 유실되지 않게 하기 위해서다. 과거 이벤트가 많아도 집합에서 종목 단위로 합쳐진다.
         if (ORDER_BOOK_UPDATED_REASON.equals(reason(value))) {
+            dirtySymbolRegistry.markDirty(symbol);
             acknowledge(record);
             clearRetryCount(record);
             return;

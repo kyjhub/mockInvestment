@@ -53,6 +53,8 @@ toss-invest:
     ping-interval-seconds: ${TOSS_WS_PING_INTERVAL_SECONDS:60}
     slot-lock-ttl-ms: ${TOSS_WS_SLOT_LOCK_TTL_MS:15000}
     slot-heartbeat-ms: ${TOSS_WS_SLOT_HEARTBEAT_MS:5000}
+    # 거절된 종목을 다시 시도하기까지의 시간. 종목 마스터에 뒤늦게 등록되는 경우가 있다.
+    rejected-symbol-ttl-ms: ${TOSS_WS_REJECTED_SYMBOL_TTL_MS:600000}
 
 market-calendar:
   cache:
@@ -82,8 +84,9 @@ matching-engine:
     fixed-delay-ms: ${MATCHING_ENGINE_DIRTY_DRAIN_DELAY_MS:150}
     # 한 사이클이 길어지면 fixedDelay 간격 가정이 깨진다. 실행 시간을 보며 조정한다.
     batch-size: ${MATCHING_ENGINE_DIRTY_DRAIN_BATCH_SIZE:20}
-    # 매칭이 DB 커넥션을 점유하므로 HikariCP 최대 커넥션 수를 넘지 않아야 한다.
-    pool-size: ${MATCHING_ENGINE_DIRTY_DRAIN_POOL_SIZE:2}
+    # 드레인은 fixedDelay 작업 하나뿐이라 풀을 키워도 동시에 두 개가 돌지 않는다.
+    # 이 풀의 목적은 병렬 처리가 아니라 다른 스케줄 작업과의 격리이므로 1이면 충분하다.
+    pool-size: ${MATCHING_ENGINE_DIRTY_DRAIN_POOL_SIZE:1}
   rematch:
     fixed-delay-ms: ${MATCHING_ENGINE_REMATCH_FIXED_DELAY_MS:30000}
   lock:
