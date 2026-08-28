@@ -19,6 +19,7 @@ class TossOrderBookWebSocketManagerTests {
         null,
         null,
         null,
+        null,
         null
     );
 
@@ -45,6 +46,21 @@ class TossOrderBookWebSocketManagerTests {
         for (int slotIndex = 0; slotIndex < SLOTS; slotIndex++) {
             assertThat(manager.symbolsForSlot(assigned, slotIndex)).hasSizeLessThanOrEqualTo(MAX_PER_CONNECTION);
         }
+    }
+
+    @Test
+    void assignmentDependsOnlyOnTheSharedOrderedList() {
+        // 거절 정보는 슬롯 소유자만 안다. 그것으로 목록을 먼저 걸러 배정하면 서버마다 결과가 달라져
+        // 어떤 종목은 두 연결이 중복 구독하고 어떤 종목은 아무도 구독하지 않게 된다.
+        // 배정은 원본 목록만 보고 계산되어야 어느 인스턴스에서 돌려도 같은 결과가 나온다.
+        List<String> assigned = List.of("A", "B", "C", "D");
+
+        assertThat(manager.symbolsForSlot(assigned, 0)).containsExactly("A", "C");
+        assertThat(manager.symbolsForSlot(assigned, 1)).containsExactly("B", "D");
+
+        // 거절된 A를 뺀 목록으로 배정하면 B와 D가 겹치고 C는 누락된다 — 그래서 이 방식을 쓰지 않는다.
+        List<String> filtered = List.of("B", "C", "D");
+        assertThat(manager.symbolsForSlot(filtered, 0)).containsExactly("B", "D");
     }
 
     @Test
