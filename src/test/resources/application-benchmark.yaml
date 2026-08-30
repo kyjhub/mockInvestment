@@ -1,0 +1,42 @@
+# 트랜잭션 경계 벤치마크 전용 설정.
+# docker compose 를 55432/56379 포트로 띄운 로컬 컨테이너를 가리킨다.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:55432/papertrading
+    username: papertrading
+    password: papertrading
+  jpa:
+    hibernate:
+      ddl-auto: update
+  data:
+    redis:
+      host: localhost
+      port: 56379
+
+# 스케줄 작업이 측정에 끼어들지 않도록 주기를 사실상 무한대로 둔다.
+toss-invest:
+  websocket:
+    enabled: false
+    slot-heartbeat-ms: 3600000
+    declare-debounce-ms: 3600000
+orderbook:
+  active-symbols:
+    refresh-ms: 3600000
+  polling:
+    fixed-delay-ms: 3600000
+    idle-fixed-delay-ms: 3600000
+price:
+  polling:
+    fixed-delay-ms: 3600000
+daily-price-range:
+  polling:
+    fixed-delay-ms: 3600000
+matching-engine:
+  polling:
+    fixed-delay-ms: 3600000
+  stream:
+    pending-recovery-delay-ms: 3600000
+  rematch:
+    fixed-delay-ms: 3600000
+  dirty-drain:
+    fixed-delay-ms: 3600000
