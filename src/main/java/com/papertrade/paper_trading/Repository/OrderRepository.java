@@ -16,6 +16,12 @@ import org.springframework.data.repository.query.Param;
 
 public interface OrderRepository extends JpaRepository<Order, Long> {
 
+    /*
+     * 매칭 후보 조회는 자기 주문(incoming)뿐 아니라 "이번 스윕에서 체결 불가로 판명된 상대"도 제외한다.
+     * 제외하지 않으면 같은 후보를 계속 다시 뽑아 무한 루프가 된다.
+     * 호출자가 항상 자기 주문 id를 넣고 시작하므로 컬렉션이 비는 경우는 없다.
+     */
+
     Optional<Order> findByAccountIdAndClientOrderId(Long accountId, String clientOrderId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -25,7 +31,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""
         select o from Order o
-        where o.id <> :incomingOrderId
+        where o.id not in :excludedOrderIds
           and o.stock.id = :stockId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.SELL
           and o.status in :statuses
@@ -35,7 +41,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         order by o.orderPrice asc, o.submittedAt asc, o.remainingQuantity desc
         """)
     List<Order> findMatchableSellOrders(
-        @Param("incomingOrderId") Long incomingOrderId,
+        @Param("excludedOrderIds") Collection<Long> excludedOrderIds,
         @Param("stockId") Long stockId,
         @Param("maxPrice") BigDecimal maxPrice,
         @Param("statuses") Collection<OrderStatus> statuses,
@@ -45,7 +51,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""
         select o from Order o
-        where o.id <> :incomingOrderId
+        where o.id not in :excludedOrderIds
           and o.stock.id = :stockId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
           and o.status in :statuses
@@ -55,7 +61,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         order by o.orderPrice desc, o.submittedAt asc, o.remainingQuantity desc
         """)
     List<Order> findMatchableBuyOrders(
-        @Param("incomingOrderId") Long incomingOrderId,
+        @Param("excludedOrderIds") Collection<Long> excludedOrderIds,
         @Param("stockId") Long stockId,
         @Param("minPrice") BigDecimal minPrice,
         @Param("statuses") Collection<OrderStatus> statuses,

@@ -91,6 +91,12 @@ public class Order {
     @Column(name = "canceled_at")
     private LocalDateTime canceledAt;
 
+    @Column(name = "rejected_at")
+    private LocalDateTime rejectedAt;
+
+    @Column(name = "reject_reason", length = 255)
+    private String rejectReason;
+
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
@@ -136,5 +142,28 @@ public class Order {
         }
         this.status = OrderStatus.CANCELED;
         this.canceledAt = LocalDateTime.now();
+    }
+
+    /**
+     * 계좌 조건(잔고·보유 수량)으로 더 이상 체결될 수 없는 주문을 종료한다.
+     *
+     * <p>유동성이 없어서 체결이 안 된 주문에는 쓰지 않는다. 그건 계좌 문제가 아니라
+     * 시장 상태이므로 계속 대기해야 한다.
+     *
+     * <p>체결 이력이 있으면 {@code REJECTED}가 아니라 잔량 취소({@code CANCELED})로 종료한다.
+     * {@code REJECTED}는 접수 자체가 무효였다는 뜻이라 부분 체결과 같이 쓸 수 없다.
+     */
+    public void reject(String reason) {
+        if (!CANCELABLE_STATUSES.contains(this.status)) {
+            throw new IllegalArgumentException("이미 종료된 주문은 거절할 수 없습니다.");
+        }
+        this.rejectReason = reason;
+        if (this.filledQuantity > 0) {
+            this.status = OrderStatus.CANCELED;
+            this.canceledAt = LocalDateTime.now();
+            return;
+        }
+        this.status = OrderStatus.REJECTED;
+        this.rejectedAt = LocalDateTime.now();
     }
 }
