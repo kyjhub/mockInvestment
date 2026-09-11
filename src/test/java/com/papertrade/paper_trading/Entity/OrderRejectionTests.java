@@ -59,7 +59,8 @@ class OrderRejectionTests {
             OrderSide.BUY,
             OrderType.LIMIT,
             new BigDecimal("100.0000"),
-            10L
+            10L,
+            new BigDecimal("100.0000")
         );
     }
 }

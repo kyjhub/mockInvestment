@@ -11,6 +11,7 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
@@ -31,7 +32,9 @@ import org.hibernate.annotations.UpdateTimestamp;
 @Entity
 @Table(
     name = "orders",
-    uniqueConstraints = @UniqueConstraint(columnNames = {"account_id", "client_order_id"})
+    uniqueConstraints = @UniqueConstraint(columnNames = {"account_id", "client_order_id"}),
+    // 주문 접수마다 이 계좌의 미체결 구속액을 집계한다. 가용잔고를 컬럼으로 들고 있지 않기 때문이다.
+    indexes = @Index(name = "idx_orders_account_side_status", columnList = "account_id, order_side, status")
 )
 @Check(constraints = "order_quantity > 0 and filled_quantity >= 0 and remaining_quantity >= 0 and filled_quantity + remaining_quantity = order_quantity")
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
@@ -69,6 +72,18 @@ public class Order {
 
     @Column(name = "order_price", precision = 19, scale = 4)
     private BigDecimal orderPrice;
+
+    /**
+     * 이 주문이 예수금에서 구속하는 1주당 금액. 매수 주문에만 있다.
+     *
+     * <p>지정가는 주문가격, 시장가는 <b>접수 시점의 당일 고가</b>다. 접수 때 한 번 정하고 이후 바뀌지 않는다.
+     *
+     * <p>파생값을 저장하는 것처럼 보이지만 성격이 다르다. 주문의 불변 속성이라 드리프트가 생길 수 없고,
+     * 덕분에 구속액 집계가 외부 시세 조회 없이 {@code orders} 한 테이블에서 순수 SQL로 끝난다.
+     * 계좌 row lock을 쥔 채 Toss를 기다리는 일이 없어야 하므로 이 점이 중요하다.
+     */
+    @Column(name = "reserved_unit_price", precision = 19, scale = 4)
+    private BigDecimal reservedUnitPrice;
 
     @Column(name = "order_quantity", nullable = false)
     private Long orderQuantity;
@@ -108,7 +123,8 @@ public class Order {
         OrderSide orderSide,
         OrderType orderType,
         BigDecimal orderPrice,
-        Long orderQuantity
+        Long orderQuantity,
+        BigDecimal reservedUnitPrice
     ) {
         return Order.builder()
             .account(account)
@@ -118,6 +134,7 @@ public class Order {
             .orderType(orderType)
             .orderPrice(orderPrice)
             .orderQuantity(orderQuantity)
+            .reservedUnitPrice(reservedUnitPrice)
             .filledQuantity(0L)
             .remainingQuantity(orderQuantity)
             .status(OrderStatus.PENDING)

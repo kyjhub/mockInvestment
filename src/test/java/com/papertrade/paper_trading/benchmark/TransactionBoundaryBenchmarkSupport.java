@@ -251,7 +251,8 @@ abstract class TransactionBoundaryBenchmarkSupport {
                 OrderSide.BUY,
                 OrderType.LIMIT,
                 ORDER_PRICE,
-                ORDER_QUANTITY
+                ORDER_QUANTITY,
+                ORDER_PRICE
             ));
             targets.add(new Target(order.getId(), stock.getSymbol()));
         }
