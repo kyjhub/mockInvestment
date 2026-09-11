@@ -39,6 +39,7 @@ public class TossOrderBookWebSocketManager {
     private final ActiveOrderBookSymbolRegistry activeSymbolRegistry;
     private final OrderBookService orderBookService;
     private final RejectedWebSocketSymbolRegistry rejectedSymbolRegistry;
+    private final DeclaredWebSocketSymbolRegistry declaredSymbolRegistry;
     private final ObjectMapper objectMapper;
 
     private final Map<Integer, TossOrderBookWebSocketConnection> connections = new ConcurrentHashMap<>();
@@ -90,6 +91,9 @@ public class TossOrderBookWebSocketManager {
     public void refreshSubscriptions() {
         if (!properties.enabled() || connections.isEmpty()) {
             coveredSnapshot = List.of();
+            // 비우지 않으면 WebSocket을 내린 뒤에도 마지막 선언 목록이 남아, 매칭이 REST 폴백을 영영 건너뛴다.
+            // 캐시는 TTL로 사라지므로 그 뒤로는 외부 체결이 조용히 멈춘다.
+            declaredSymbolRegistry.replaceAll(Set.of());
             return;
         }
 
@@ -106,6 +110,9 @@ public class TossOrderBookWebSocketManager {
             connection.pingIfDue();
         }
         coveredSnapshot = List.copyOf(covered);
+        // 매칭 게이트는 covered가 아니라 이 목록을 본다. connection이 실패 경로마다 자기 선언을 비우므로
+        // 연결이 죽으면 다음 틱에 여기서 빠지고, 매칭은 그 순간부터 REST 경로로 돌아간다.
+        declaredSymbolRegistry.replaceAll(declaredSymbols());
     }
 
     /**
@@ -236,5 +243,7 @@ public class TossOrderBookWebSocketManager {
     @PreDestroy
     public void shutdown() {
         releaseAll();
+        // 이후 배정 틱이 돌지 않으므로 여기서 직접 비운다.
+        declaredSymbolRegistry.replaceAll(Set.of());
     }
 }

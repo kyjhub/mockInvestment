@@ -26,6 +26,7 @@ class TossOrderBookWebSocketManagerTests {
     private final ActiveOrderBookSymbolRegistry activeSymbolRegistry = mock(ActiveOrderBookSymbolRegistry.class);
     private final RejectedWebSocketSymbolRegistry rejectedSymbolRegistry =
         mock(RejectedWebSocketSymbolRegistry.class);
+    private final DeclaredWebSocketSymbolRegistry declaredSymbolRegistry = new DeclaredWebSocketSymbolRegistry();
 
     private final TossOrderBookWebSocketManager manager = new TossOrderBookWebSocketManager(
         properties(),
@@ -34,8 +35,20 @@ class TossOrderBookWebSocketManagerTests {
         activeSymbolRegistry,
         null,
         rejectedSymbolRegistry,
+        declaredSymbolRegistry,
         null
     );
+
+    @Test
+    void clearsDeclaredRegistryWhenThereIsNoLiveConnection() {
+        // 매칭 게이트가 이 목록을 보고 REST를 건너뛴다. 슬롯을 전부 잃거나 WebSocket을 내렸는데도
+        // 목록이 남으면, 캐시가 TTL로 사라진 뒤 외부 체결이 조용히 멈춘다.
+        declaredSymbolRegistry.replaceAll(Set.of("AAPL"));
+
+        manager.refreshSubscriptions();
+
+        assertThat(declaredSymbolRegistry.declaredSymbols()).isEmpty();
+    }
 
     @Test
     void fillsBothSlotsUpToCapacity() {

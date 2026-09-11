@@ -73,7 +73,7 @@ class MatchingEngineTransactionServiceTests {
             new MatchableOrder(2L, LocalDateTime.now()),
             new MatchableOrder(3L, LocalDateTime.now())
         ));
-        when(orderBookService.getOrderBookNoOlderThan(anyString(), any()))
+        when(orderBookService.getOrderBookForMatching(anyString(), any()))
             .thenReturn(new OrderBookResponse(null, LocalDateTime.now()));
 
         return new MatchingEngineTransactionService(

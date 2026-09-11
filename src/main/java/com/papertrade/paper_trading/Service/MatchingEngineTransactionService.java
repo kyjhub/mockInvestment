@@ -58,7 +58,8 @@ public class MatchingEngineTransactionService {
         TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
         for (MatchableOrder matchableOrder : matchableOrders) {
             // Toss 호출은 주문의 pessimistic lock을 잡기 전, transaction 밖에서 수행한다.
-            OrderBookResponse orderBook = orderBookService.getOrderBookNoOlderThan(symbol, matchableOrder.submittedAt());
+            // WebSocket 구독 종목이면 호출 자체가 없다 — 캐시가 곧 최신 상태다.
+            OrderBookResponse orderBook = orderBookService.getOrderBookForMatching(symbol, matchableOrder.submittedAt());
             Long orderId = matchableOrder.id();
             try {
                 transactionTemplate.executeWithoutResult(ignored -> matchOrder(orderId, orderBook, dailyPriceRange));

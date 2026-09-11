@@ -62,7 +62,10 @@ market-calendar:
 
 orderbook:
   cache:
-    ttl-seconds: ${ORDERBOOK_CACHE_TTL_SECONDS:30}
+    # polling.staleness-threshold-ms보다 반드시 커야 한다.
+    # 폴링이 30초마다 되살리는 동안 키가 만료되면, 호가가 조용한 WebSocket 구독 종목은
+    # 주기적으로 캐시를 잃어 외부 유동성 없이 내부 체결만 하게 된다.
+    ttl-seconds: ${ORDERBOOK_CACHE_TTL_SECONDS:120}
   polling:
     fixed-delay-ms: ${ORDERBOOK_POLLING_FIXED_DELAY_MS:1000}
     idle-fixed-delay-ms: ${ORDERBOOK_POLLING_IDLE_FIXED_DELAY_MS:20000}
