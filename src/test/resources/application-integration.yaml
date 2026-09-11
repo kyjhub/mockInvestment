@@ -1,0 +1,37 @@
+# 통합 테스트 profile. 접속 정보는 IntegrationTestContainers가 @DynamicPropertySource로 덮어쓴다.
+spring:
+  jpa:
+    hibernate:
+      # 컨테이너가 JVM마다 새로 뜨므로 stale schema가 없다.
+      # create-drop이 아닌 이유: 컨테이너를 여러 test context가 공유하는데,
+      # 한 context가 닫히며 schema를 지우면 cache된 다른 context가 테이블을 잃는다.
+      ddl-auto: update
+
+# 외부 연결과 background 작업이 테스트에 끼어들지 않게 한다.
+toss-invest:
+  openapi:
+    client-id: test-client-id
+    secret-token: test-secret-token
+  websocket:
+    enabled: false
+    slot-heartbeat-ms: 3600000
+    declare-debounce-ms: 3600000
+orderbook:
+  active-symbols:
+    refresh-ms: 3600000
+  polling:
+    fixed-delay-ms: 3600000
+    idle-fixed-delay-ms: 3600000
+price:
+  polling:
+    fixed-delay-ms: 3600000
+daily-price-range:
+  polling:
+    fixed-delay-ms: 3600000
+matching-engine:
+  stream:
+    pending-recovery-delay-ms: 3600000
+  rematch:
+    fixed-delay-ms: 3600000
+  dirty-drain:
+    fixed-delay-ms: 3600000
