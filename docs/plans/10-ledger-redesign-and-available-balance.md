@@ -16,7 +16,7 @@
 | 한 사건 = 한 거래 | 내부 체결의 매수/매도 두 행이 서로 연결되지 않음 | **불충족** |
 | 멱등성 | 고유키·unique 제약 없음 | **불충족** |
 | 파생값 재계산 가능 | `realized_profit`은 누적만 하고 재계산 불가 | **불충족** |
-| 수수료·세금 원장 | `Execution`에 값만 저장, 현금·원장 반영 없음 | **불충족** |
+| 수수료·세금 원장 | `Execution`에 값만 저장. 현금 차감도 원장 기록도 없음 | **불충족** |
 | 정정 수단 | 반대분개 개념 없음 | **불충족** |
 | 대사 | 없음. 어긋나도 발견할 방법이 없음 | **불충족** |
 
@@ -117,6 +117,8 @@ FEE(user)     +1,500
 
 체결 거래와 같은 `transaction_id`에 묶는다. 계산 결과가 0이면 분개를 만들지 않는다 — 0원 분개는 정보가 없다.
 
+같은 값이 `executions.commission` / `tax`에도 남지만 그쪽은 표시용 사본이고 이 분개가 authoritative다(2.1).
+
 **정정**
 
 원본 분개를 수정하거나 삭제하지 않는다. 부호를 뒤집은 새 거래를 `reversal_of_id`로 연결해 추가한다.
@@ -146,6 +148,7 @@ FEE(user)     +1,500
 | `holdings.quantity` / `total_purchase_amount` | 유지. 파생 캐시 | `= Σ(SECURITIES entries)`. 대사 대상 |
 | `holdings.average_price` | 유지 | 이동평균 계산에 상태가 필요하다. `total_purchase_amount / quantity` |
 | `executions` | 유지 + `trade_id`, `ledger_transaction_id` 추가 | 체결 사실과 원장 거래를 연결 |
+| `executions.commission` / `tax` | 유지하되 **표시용 사본**으로 명시 | 원장이 authoritative. 2.1 참고 |
 | `orders` | 유지 | 가용잔고의 원천이 된다 |
 | `daily_account_snapshots` | 유지 + 6절에서 실제로 채운다 | 마감 확정 |
 | `CashTransactionType` enum | 삭제. `LedgerAccount` + `LedgerTransactionType`으로 대체 | |
@@ -153,6 +156,21 @@ FEE(user)     +1,500
 `CashTransaction` 엔티티·리포지토리·`CashTransactionType`을 삭제하고 `MatchingEngineTransactionService`의 `createCashTransaction()`을 원장 기록으로 교체한다.
 
 **기존 데이터**: 운영 중이 아니므로 이관하지 않는다. `cash_transactions`를 드롭한다. 운영 데이터가 생긴 뒤라면 개시 분개로 잔고를 맞추는 이관 script가 별도로 필요하다.
+
+### 2.1 `executions`의 수수료·세금은 표시용 사본이다
+
+수수료·세금이 `FEE`/`TAX` 분개가 되면 같은 값이 `executions.commission` / `executions.tax`에도 남아 두 곳에 존재하게 된다. 두 컬럼을 **지우지 않고 표시용 비정규화로 유지**한다.
+
+근거는 조회 경로다. 체결 내역은 사용자가 가장 자주 보는 화면이고, 거기에 수수료를 같이 보여주는 것은 현업 증권사 화면과 같은 형태다. 매번 원장을 조인해서 읽게 만들 이유가 없다.
+
+대신 역할을 못박는다.
+
+| | 역할 |
+| --- | --- |
+| `ledger_entries`의 `FEE`/`TAX` | **authoritative.** 잔고·손익 계산의 근거는 언제나 이쪽 |
+| `executions.commission` / `tax` | 표시용 사본. 계산에 쓰지 않는다 |
+
+사본은 어긋날 수 있으므로 6.1의 대사 항목에 넣는다. 엔티티 주석에도 "표시용 사본이며 계산에 쓰지 않는다"를 남겨, 나중에 이 값으로 손익을 계산하는 코드가 들어오지 않게 한다.
 
 ## 3. 가용잔고 — 저장하지 않고 `orders`에서 파생한다
 
@@ -313,6 +331,8 @@ public OrderResponse placeOrder(User user, OrderPlaceRequest request) {
 4. 실현손익      accounts.realized_profit       = −Σ(REALIZED_PNL entries)
 5. 보유 수량    holdings.quantity              = Σ(SECURITIES entries.quantity)
 6. 보유 원가    holdings.total_purchase_amount = Σ(SECURITIES entries.amount)
+7. 수수료 사본  Σ(executions.commission)       = Σ(FEE entries)      (거래 단위로 대조)
+8. 세금 사본    Σ(executions.tax)              = Σ(TAX entries)
 ```
 
 가용잔고는 저장하지 않으므로 대사 대상이 아니다(3절).
@@ -378,16 +398,18 @@ ledger:
 
 전체 test가 52건 전부 통과하는 상태가 되었다. 자세한 구성은 `current-implementation-overview.md` §17.
 
-**A. 원장 모델 교체**
+**A. 원장 모델 교체** — **구현 완료 (2026-09-12)**
 
-3. `LedgerAccount`, `LedgerTransactionType` enum 신설.
-4. `LedgerTransaction`, `LedgerEntry` 엔티티·리포지토리 신설. 거래 단위 균형을 강제하는 `LedgerPosting` 서비스(분개 목록을 받아 합계 0을 검증하고 저장) 추가.
-5. `MatchingEngineTransactionService`의 `createCashTransaction()` 호출을 원장 기록으로 교체. 체결 1건마다 `tradeId` 발급.
-6. `executions`에 `trade_id`, `ledger_transaction_id` 추가.
-7. `AccountOpeningService.open(user, initialAmount)` 신설 — 계좌 생성과 개시 분개를 한 transaction에 묶는다. 회원가입 연동은 01번 범위로 두되, 개시 원장 규약은 여기서 확정한다.
-8. `CashTransaction` 엔티티·리포지토리·`CashTransactionType` 삭제, `cash_transactions` 드롭.
+3. ~~`LedgerAccount`, `LedgerTransactionType` enum 신설.~~
+4. ~~`LedgerTransaction`, `LedgerEntry` 엔티티·리포지토리, 균형을 강제하는 posting 서비스.~~ `LedgerPostingService`.
+5. ~~`createCashTransaction()`을 원장 기록으로 교체. 체결 1건마다 `tradeId` 발급.~~
+6. ~~`executions`에 `trade_id`, `ledger_transaction_id` 추가.~~
+7. ~~`AccountOpeningService.open()` 신설.~~ 회원가입 연동은 01번 범위로 남는다.
+8. ~~`CashTransaction` 엔티티·리포지토리·`CashTransactionType` 삭제.~~
 
 **B. 가용잔고와 접수 검증** — **구현 완료 (2026-09-12)**
+
+> A보다 먼저 구현했다. B는 `orders`에서만 파생하므로 A에 의존하지 않는다.
 
 9. ~~`OrderRepository`에 구속 금액·구속 수량 집계 쿼리 추가. index 추가.~~
    `sumReservedCash()`, `sumReservedQuantity()`, `idx_orders_account_side_status`.
@@ -442,6 +464,8 @@ ledger:
 - 거래 합계가 0이 아닌 분개 목록을 `LedgerPosting`이 거부하는지
 - 내부 체결이 양쪽 계좌의 분개를 하나의 거래로 묶는지
 - 매도 체결의 `REALIZED_PNL` 분개가 `매도금액 − 취득원가`와 일치하는지
+- 수수료가 0이 아닐 때 `FEE` 분개와 `executions.commission`이 같은 값을 갖는지
+- 수수료가 0이면 `FEE` 분개를 만들지 않는지
 - 원장에서 재계산한 잔고가 `accounts.cash_balance`와 일치하는지
 - 중복 `idempotency_key`가 거부되는지
 - 미체결 매수 주문이 주문가능금액에서 빠지는지
