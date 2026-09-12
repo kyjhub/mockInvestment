@@ -29,6 +29,10 @@ public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, Long> 
         @Param("ledgerAccount") LedgerAccount ledgerAccount
     );
 
+    /** 계정과목별 전체 합계. 표시용 사본과 대조할 때 쓴다. */
+    @Query("select coalesce(sum(e.amount), 0) from LedgerEntry e where e.ledgerAccount = :ledgerAccount")
+    BigDecimal sumAmountByLedgerAccount(@Param("ledgerAccount") LedgerAccount ledgerAccount);
+
     /** 종목별 보유 원가와 수량. */
     @Query("""
         select coalesce(sum(e.amount), 0)
