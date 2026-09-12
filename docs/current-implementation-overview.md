@@ -662,7 +662,7 @@ SELL:
 
 각 주문은 `TransactionTemplate`을 사용해 별도의 짧은 DB transaction으로 처리한다. 종목 전체를 하나의 큰 transaction으로 묶지 않으므로 한 주문 처리 동안의 row lock 유지 시간을 줄인다.
 
-잔고·보유 수량 부족은 예외로 다루지 않는다. 체결 수량을 정하기 **전에** 그 제약으로 캡을 씌우고, 1주도 체결할 수 없으면 주문을 거절 상태로 종료한다(§13.10). 예외를 던지면 같은 transaction에서 이미 성사된 체결까지 롤백되고, 재시도해도 같은 자리에서 또 막히므로 체결 가능한 물량마저 영영 체결되지 않기 때문이다.
+잔고·보유 수량 부족은 예외로 다루지 않는다. 체결 수량을 정하기 **전에** 그 제약으로 캡을 씌우고, 1주도 체결할 수 없으면 주문을 거절 상태로 종료한다(§13.11). 예외를 던지면 같은 transaction에서 이미 성사된 체결까지 롤백되고, 재시도해도 같은 자리에서 또 막히므로 체결 가능한 물량마저 영영 체결되지 않기 때문이다.
 
 그래서 `matchSymbol()`까지 올라오는 `IllegalArgumentException`은 정상적인 "조건 미달"이 아니라 데이터 불일치 신호다. 그래도 루프는 중단하지 않고 해당 주문만 오류 log를 남긴 뒤 다음 주문을 계속 처리한다 — 중단하면 뒤에 줄 선 정상 주문까지 막힌다. DB 연결 장애 같은 다른 예외는 상위로 전파해 Stream 재시도와 DLQ 경로를 유지한다.
 
@@ -851,7 +851,25 @@ realizedProfit += executionAmount - costBasis
 
 투자금 충전 이후 자동 재체결은 없다. 잔고가 부족했던 주문은 이미 종료되어 있으므로 사용자가 다시 주문해야 한다.
 
-### 13.10 가용잔고(주문가능금액)와 접수 시점 검증
+### 13.10 자전거래 차단과 주문가격 밴드
+
+**같은 계좌는 매칭 후보에서 제외한다.** `findMatchableSellOrders`/`findMatchableBuyOrders`에 `o.account.id <> :accountId` 조건이 있다.
+
+막는 것은 이것이다 — 자기 자신과 체결하면 현금이 나갔다 들어와 순변동이 0인데 `REALIZED_PNL` 분개는 그대로 적립되고 평균단가도 바뀐다. 양쪽 가격을 스스로 정할 수 있으므로 원하는 만큼 손익을 만들어낼 수 있었다. 원장 균형은 깨지지 않지만 실현손익이 오염된다.
+
+**지정가 주문가격은 당일 거래 범위 ±`order.price-band.margin`(기본 0.3) 안이어야 한다.**
+
+```text
+허용 범위 = [dailyLowPrice × (1 − margin), dailyHighPrice × (1 + margin)]
+```
+
+미국 시장에는 일일 가격제한폭 제도가 없으므로 이건 규제 한도가 아니라 **오입력 방지 장치**다. 저가 매수·고가 매도를 걸어 두는 정상 주문을 막지 않도록 넉넉하게 잡는다. 국내 종목이 들어오면 전일 종가 ±30%라는 진짜 제한폭을 쓸 수 있다.
+
+같은 계좌 차단만으로는 **서로 다른 계좌가 터무니없는 가격에 맞붙는 것**을 막지 못한다. 한쪽이 잃고 한쪽이 얻는 구조라 공짜는 아니지만, 계정을 여러 개 만들면 한 계정을 희생시켜 다른 계정의 손익을 부풀릴 수 있다. 가격 밴드가 그 폭을 좁힌다.
+
+시세를 구하지 못하면 이 검증을 건너뛴다. 정합성 요건이 아니라 방어 장치이고, 외부 시세가 잠깐 막혔다고 정상 주문까지 거절하면 손해가 더 크다.
+
+### 13.11 가용잔고(주문가능금액)와 접수 시점 검증
 
 예수금을 넘는 주문은 **접수 단계에서 거절한다.** 미체결 주문이 묶어 둔 금액을 예수금에서 뺀 것이 주문가능금액이다.
 
@@ -909,7 +927,7 @@ realizedProfit += executionAmount - costBasis
 
 수수료·세금 예상액을 구속액에 더한다. 현재 `ZeroCommissionCalculator`라 0이지만 규약은 세워 두었다.
 
-### 13.11 원장 대사
+### 13.12 원장 대사
 
 로직이 아무리 정교해도 버그는 난다. 그래서 원장 시스템의 진짜 안전망은 올바르게 쓰는 코드가 아니라 **틀렸다는 것을 반드시 발견하는 장치**다. `LedgerReconciliationService`가 그 장치이며 `ledger.reconciliation.cron`(기본 매일 05:30)으로 돈다.
 
@@ -926,7 +944,7 @@ realizedProfit += executionAmount - costBasis
 
 1번이 복식부기를 쓰는 이유 그 자체다. 돈이 생기거나 사라진 것을 탐지하는 유일한 수단이며 단식부기로는 원리적으로 불가능하다. 2번이 걸리면 `LedgerPostingService`를 우회해 분개를 저장한 코드가 있다는 뜻이다.
 
-가용잔고는 저장하지 않고 `orders`에서 파생하므로 대사 대상이 아니다(§13.10).
+가용잔고는 저장하지 않고 `orders`에서 파생하므로 대사 대상이 아니다(§13.11).
 
 **불일치를 자동으로 덮어쓰지 않는다.** 조용히 맞춰 버리면 버그를 숨기게 된다. `ERROR` 로그와 `ledger.reconciliation.mismatch` metric으로 올리고 사람이 판단한다. 정정이 필요하면 원본을 남긴 채 반대분개를 추가한다.
 
@@ -1098,7 +1116,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-17개 test class에 73개 test가 있다.
+18개 test class에 80개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1112,8 +1130,9 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `MatchingEngineStreamConsumerTests` | 3 | 단위 | 구형 호가 이벤트 이관, lock busy PEL 유지, quota ACK |
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
 | `OrderFillLedgerIntegrityTests` | 6 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정 |
-| `OrderPlacementReservationIntegrationTest` | 9 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가 구속 단가, 매도가능수량 |
+| `OrderPlacementReservationIntegrationTest` | 12 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가 구속 단가, 매도가능수량, 주문가격 밴드 |
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
+| `SelfTradeAndConstraintIntegrationTest` | 4 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 음수 잔고·보유 DB 거부 |
 | `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
@@ -1132,7 +1151,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-12 기준 `./gradlew test --rerun-tasks`는 **73건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-12 기준 `./gradlew test --rerun-tasks`는 **80건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1147,7 +1166,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - 누적 수익률, 누적 수익금, 누적 신청금 초기화 API
 - 보유 자산(종목별 평가) 조회 API — 잔고·주문가능금액 조회는 `GET /api/v1/accounts/me/balance`로 구현됨
 - `Account.totalAssetValue` 재평가 및 체결 후 갱신
-- 일별 계좌 snapshot batch. `DailyAccountSnapshot`의 `stock_evaluation`·`unrealized_profit`·`return_rate`가 시가 평가를 요구하는데 평가 batch가 아직 없다 (§13.11 대사는 원장 파생만으로 동작하므로 이것과 무관하게 이미 돈다)
+- 일별 계좌 snapshot batch. `DailyAccountSnapshot`의 `stock_evaluation`·`unrealized_profit`·`return_rate`가 시가 평가를 요구하는데 평가 batch가 아직 없다 (§13.12 대사는 원장 파생만으로 동작하므로 이것과 무관하게 이미 돈다)
 - 리더보드 계산 batch와 조회 API
 - 국내/미국 종목 마스터 적재
 - 환율 API client, cache, 저장과 적용
@@ -1194,4 +1213,4 @@ Redis 슬롯 lock은 계정의 동시 WebSocket 연결 수를 2개로 제한하�
 
 `application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `SPRING_JPA_DDL_AUTO=update`와 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
 
-다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.reject_reason`(§13.8), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.10)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
+다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.reject_reason`(§13.8), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
