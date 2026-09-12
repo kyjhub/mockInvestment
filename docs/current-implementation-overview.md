@@ -1153,7 +1153,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-19개 test class에 86개 test가 있다.
+21개 test class에 97개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1171,6 +1171,8 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
 | `SelfTradeAndConstraintIntegrationTest` | 7 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 큰 주문의 완전 체결, 음수 잔고·보유 DB 거부 |
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
+| `ValuationServiceTests` | 6 | 단위 | 총자산·평가손익 계산, 예수금 제외 수익률, 시세 미확보·다중 통화 시 생략 |
+| `TotalAssetValuationIntegrationTest` | 5 | 통합 | total_asset_value 갱신, 예수금 미훼손, 종목당 1회 조회, 잔고 화면, 시세 장애 시 부분 응답 |
 | `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
@@ -1189,7 +1191,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-12 기준 `./gradlew test --rerun-tasks`는 **86건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-12 기준 `./gradlew test --rerun-tasks`는 **97건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1203,7 +1205,6 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - 초기화 이후 누적 신청금 5,000,000 제한 계산
 - 누적 수익률, 누적 수익금, 누적 신청금 초기화 API
 - 보유 자산(종목별 평가) 조회 API — 잔고·주문가능금액 조회는 `GET /api/v1/accounts/me/balance`로 구현됨
-- `Account.totalAssetValue` 재평가 및 체결 후 갱신
 - 일별 계좌 snapshot batch. `DailyAccountSnapshot`의 `stock_evaluation`·`unrealized_profit`·`return_rate`가 시가 평가를 요구하는데 평가 batch가 아직 없다 (§13.12 대사는 원장 파생만으로 동작하므로 이것과 무관하게 이미 돈다)
 - 리더보드 계산 batch와 조회 API
 - 국내/미국 종목 마스터 적재
@@ -1221,9 +1222,49 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 회원가입이 계좌를 만들지 않지만 주문 접수는 반드시 사용자 계좌를 조회한다. 별도의 seed나 외부 계좌 생성 과정이 없다면 신규 가입자는 `계좌를 찾을 수 없습니다.` 오류로 주문할 수 없다.
 
-### 19.2 총자산 값
+### 19.2 총자산 평가와 잔고 화면
 
-체결 transaction은 현금, 보유량, 평균단가, 실현손익을 갱신하지만 `Account.totalAssetValue`는 갱신하지 않는다. 따라서 현재 필드는 실제 자산 상태와 달라질 수 있다.
+`Account.totalAssetValue`는 `TotalAssetValuationScheduler`가 `valuation.total-asset.fixed-delay-ms`(기본 60초) 주기로 갱신한다.
+
+```text
+종목 평가액 = holdings.quantity × 현재가
+총자산      = accounts.cash_balance + Σ(종목 평가액)
+평가손익    = 평가액 − Σ(holdings.total_purchase_amount)
+```
+
+**평가액은 원장 파생이 아니다.** 시가는 외부에서 온 값이고 같은 보유라도 어제와 오늘이 다르므로 대사로 검증할 수 없다(§13.12). 입력인 보유 수량과 예수금은 원장 파생이라 그쪽은 검증된다.
+
+#### 계산하지 않는 경우
+
+평가를 만들지 않고 `null`로 두는 경우가 둘이다. 일부 종목만 반영한 총자산은 틀린 값이고, 틀린 값을 보여주는 것보다 "계산 중"이 낫다.
+
+- **시세를 구하지 못한 종목이 하나라도 있을 때**
+- **보유 종목의 통화가 둘 이상일 때** — `Account`에 통화 개념이 없어 USD 평가액과 KRW 예수금을 그냥 더하게 된다. 지금은 거래 가능한 종목이 전부 USD라 성립하지만 국내 종목이 들어오는 순간 조용히 틀린 값이 나온다. 그래서 주석이 아니라 코드로 막는다. 환율 client가 들어오면 이 가드를 환산으로 바꾼다
+
+#### 시세는 종목당 한 번만 조회한다
+
+`PriceService.getPrices()`가 캐시에 없는 종목만 묶어 한 번의 Toss 호출로 가져온다. 계좌마다 부르면 호출 수가 계좌 수에 비례하는데, 같은 종목을 여러 계좌가 들고 있어도 시세는 하나다. 그래서 전체 보유의 distinct 종목을 한 번에 넘긴다.
+
+#### 갱신은 단일 컬럼 update로 한다
+
+엔티티를 읽어 필드를 바꾸는 대신 `update accounts set total_asset_value = ?`를 쓴다. 평가는 **락을 잡지 않으므로**, 엔티티를 통째로 flush하면 그 사이 체결이 바꾼 `cash_balance`를 오래된 값으로 되돌릴 수 있다.
+
+락을 잡지 않는 이유는 이 값이 표시용이기 때문이다. 잠그면 평가가 체결과 주문 접수를 막는다. 잠깐 어긋나도 다음 주기에 맞는다.
+
+#### 잔고 화면은 batch 값을 쓰지 않는다
+
+`GET /api/v1/accounts/me/balance`는 `total_asset_value` 컬럼이 아니라 **조회 시점의 시세로 다시 계산한다.** 그 컬럼은 분 단위 캐시라 사용자가 보는 순간의 값과 어긋날 수 있다.
+
+**평가손익률의 분모는 총매입금액이다 — 예수금을 포함하지 않는다.** 현업 증권사 잔고 화면과 같은 기준이고, 리더보드의 "수익률"(예수금 포함, 12번 계획)과는 다른 값이다.
+
+| 위치 | 이름 | 분모 |
+| --- | --- | --- |
+| 잔고 화면 | 평가손익률 | 총매입금액 |
+| 리더보드 | 수익률 | 시즌 시작 자본 |
+
+두 값에 같은 이름을 붙이면 사용자가 버그로 신고한다.
+
+시세를 구하지 못해도 잔고 조회는 실패하지 않는다. 예수금·주문가능금액·총매입금액은 시세와 무관하므로 그대로 응답하고 평가 관련 필드만 `null`이 된다.
 
 ### 19.3 외부 호가 소비 정책
 
