@@ -24,10 +24,16 @@ import com.papertrade.paper_trading.Service.LedgerPostingService.Posting;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -44,6 +50,22 @@ public class MatchingEngineTransactionService {
 
     private static final int MONEY_SCALE = 2;
     private static final Pageable FIRST_MATCHABLE_ORDER = PageRequest.of(0, 1);
+    /**
+     * 상대 계좌를 고르기 위해 훑어볼 주문 수.
+     *
+     * <p>가격-시간 우선순위 순으로 읽어 앞에서부터 계좌를 모은다. 한 계좌가 여러 주문을 낼 수 있어
+     * 주문 수는 계좌 수보다 넉넉해야 한다.
+     */
+    private static final Pageable COUNTERPARTY_SCAN_LIMIT = PageRequest.of(0, 100);
+
+    /**
+     * 한 매칭이 미리 잠글 상대 계좌 수 상한.
+     *
+     * <p>많이 잡을수록 더 많은 주문을 한 번에 체결할 수 있지만 그만큼 다른 매칭을 막는다.
+     * 잠긴 계좌는 체결 상대가 아니어도 그동안 주문을 낼 수 없다.
+     * 넘어간 계좌의 주문은 다음 매칭에서 다시 후보가 되므로 체결 기회를 잃지는 않는다.
+     */
+    private static final int MAX_COUNTERPARTY_ACCOUNTS = 10;
     private static final List<OrderStatus> MATCHABLE_STATUSES = List.of(
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
@@ -94,20 +116,66 @@ public class MatchingEngineTransactionService {
             return;
         }
 
+        Map<Long, Account> lockedAccounts = lockParticipantAccounts(incomingOrder);
+
         if (incomingOrder.getOrderSide() == OrderSide.BUY) {
-            matchBuyOrder(incomingOrder, orderBook, dailyPriceRange);
+            matchBuyOrder(incomingOrder, orderBook, dailyPriceRange, lockedAccounts);
         } else {
-            matchSellOrder(incomingOrder, orderBook, dailyPriceRange);
+            matchSellOrder(incomingOrder, orderBook, dailyPriceRange, lockedAccounts);
         }
+    }
+
+    /**
+     * 이 매칭이 건드릴 수 있는 계좌를 <b>id 오름차순으로</b> 모두 잠근다.
+     *
+     * <p>예전에는 진입 시점에 자기 계좌를 잡고, 내부 체결 때 상대 계좌를 추가로 잡았다. 그러면
+     * 종목 A의 매칭이 계좌1→계좌2 순으로, 종목 B의 매칭이 계좌2→계좌1 순으로 잡을 수 있다.
+     * 심볼 락은 종목 단위라 두 매칭이 동시에 돌 수 있으므로 데드락이 성립했다.
+     *
+     * <p>모든 트랜잭션이 같은 순서로 잡으면 순환이 만들어지지 않는다. 그래서 상대 후보 계좌를
+     * <b>락 없이</b> 먼저 읽고, 자기 계좌까지 합쳐 id 순으로 하나씩 잠근다.
+     *
+     * <p>여기서 잠기지 않은 계좌의 주문은 이번 매칭에서 상대로 쓰지 않는다. 락 없이 읽은 뒤
+     * 상태가 바뀌었거나 후보 수 상한을 넘긴 경우인데, 그 주문은 다음 매칭에서 다시 후보가 된다.
+     * 순서를 지키려고 나중에 낮은 id를 잡는 것보다 한 번 거르는 쪽이 안전하다.
+     */
+    private Map<Long, Account> lockParticipantAccounts(Order incomingOrder) {
+        Long incomingAccountId = incomingOrder.getAccount().getId();
+        List<Long> scannedAccountIds = incomingOrder.getOrderSide() == OrderSide.BUY
+            ? orderRepository.findMatchableSellAccountIds(
+                incomingAccountId, incomingOrder.getStock().getId(), limitPrice(incomingOrder),
+                MATCHABLE_STATUSES, COUNTERPARTY_SCAN_LIMIT)
+            : orderRepository.findMatchableBuyAccountIds(
+                incomingAccountId, incomingOrder.getStock().getId(), limitPrice(incomingOrder),
+                MATCHABLE_STATUSES, COUNTERPARTY_SCAN_LIMIT);
+
+        // 우선순위를 유지한 채 중복을 제거하고 상한까지 자른다. 상한에 걸려 잘려나가는 것은
+        // 가격이 나쁜 쪽이어야 한다 — 그래서 조회를 가격-시간 순으로 받는다.
+        Set<Long> counterpartyAccountIds = new LinkedHashSet<>(scannedAccountIds);
+        SortedSet<Long> orderedAccountIds = counterpartyAccountIds.stream()
+            .limit(MAX_COUNTERPARTY_ACCOUNTS)
+            .collect(Collectors.toCollection(TreeSet::new));
+        orderedAccountIds.add(incomingAccountId);
+
+        Map<Long, Account> lockedAccounts = new HashMap<>();
+        for (Long accountId : orderedAccountIds) {
+            accountRepository.findByIdForUpdate(accountId)
+                .ifPresent(account -> lockedAccounts.put(accountId, account));
+        }
+
+        if (!lockedAccounts.containsKey(incomingAccountId)) {
+            throw new IllegalArgumentException("계좌를 찾을 수 없습니다.");
+        }
+        return lockedAccounts;
     }
 
     private void matchBuyOrder(
         Order buyOrder,
         OrderBookResponse orderBook,
-        DailyPriceRangeResponse dailyPriceRange
+        DailyPriceRangeResponse dailyPriceRange,
+        Map<Long, Account> lockedAccounts
     ) {
-        Account buyerAccount = accountRepository.findByIdForUpdate(buyOrder.getAccount().getId())
-            .orElseThrow(() -> new IllegalArgumentException("계좌를 찾을 수 없습니다."));
+        Account buyerAccount = lockedAccounts.get(buyOrder.getAccount().getId());
         Holding buyerHolding = holdingRepository.findByAccountIdAndStockId(
             buyerAccount.getId(),
             buyOrder.getStock().getId()
@@ -143,7 +211,7 @@ public class MatchingEngineTransactionService {
                     Math.min(buyOrder.getRemainingQuantity(), internalSellOrder.getRemainingQuantity()),
                     affordableQuantity
                 );
-                long executedQuantity = executeInternalTrade(buyOrder, internalSellOrder, executionPrice, requestedQuantity);
+                long executedQuantity = executeInternalTrade(buyOrder, internalSellOrder, executionPrice, requestedQuantity, lockedAccounts);
                 if (executedQuantity <= 0) {
                     // 상대 매도자의 보유가 비어 있다. 같은 후보를 다시 뽑으면 무한 루프이므로 제외하고 계속한다.
                     excludedSellOrderIds.add(internalSellOrder.getId());
@@ -191,10 +259,10 @@ public class MatchingEngineTransactionService {
     private void matchSellOrder(
         Order sellOrder,
         OrderBookResponse orderBook,
-        DailyPriceRangeResponse dailyPriceRange
+        DailyPriceRangeResponse dailyPriceRange,
+        Map<Long, Account> lockedAccounts
     ) {
-        Account sellerAccount = accountRepository.findByIdForUpdate(sellOrder.getAccount().getId())
-            .orElseThrow(() -> new IllegalArgumentException("계좌를 찾을 수 없습니다."));
+        Account sellerAccount = lockedAccounts.get(sellOrder.getAccount().getId());
         Holding sellerHolding = holdingRepository.findByAccountIdAndStockId(
             sellerAccount.getId(),
             sellOrder.getStock().getId()
@@ -234,7 +302,7 @@ public class MatchingEngineTransactionService {
                     Math.min(sellOrder.getRemainingQuantity(), internalBuyOrder.getRemainingQuantity()),
                     sellerHolding.getQuantity()
                 );
-                long executedQuantity = executeInternalTrade(internalBuyOrder, sellOrder, executionPrice, requestedQuantity);
+                long executedQuantity = executeInternalTrade(internalBuyOrder, sellOrder, executionPrice, requestedQuantity, lockedAccounts);
                 if (executedQuantity <= 0) {
                     // 상대 매수자의 잔고가 부족하다. 제외하고 다음 후보로.
                     excludedBuyOrderIds.add(internalBuyOrder.getId());
@@ -286,12 +354,16 @@ public class MatchingEngineTransactionService {
         Order buyOrder,
         Order sellOrder,
         BigDecimal executionPrice,
-        long requestedQuantity
+        long requestedQuantity,
+        Map<Long, Account> lockedAccounts
     ) {
-        Account buyerAccount = accountRepository.findByIdForUpdate(buyOrder.getAccount().getId())
-            .orElseThrow(() -> new IllegalArgumentException("매수 계좌를 찾을 수 없습니다."));
-        Account sellerAccount = accountRepository.findByIdForUpdate(sellOrder.getAccount().getId())
-            .orElseThrow(() -> new IllegalArgumentException("매도 계좌를 찾을 수 없습니다."));
+        // 여기서 계좌 락을 새로 잡지 않는다. 잡는 순간 트랜잭션마다 획득 순서가 달라져 데드락이 생긴다.
+        // 미리 id 순으로 잠가 둔 것만 쓰고, 없으면 이번 매칭의 상대가 아니다.
+        Account buyerAccount = lockedAccounts.get(buyOrder.getAccount().getId());
+        Account sellerAccount = lockedAccounts.get(sellOrder.getAccount().getId());
+        if (buyerAccount == null || sellerAccount == null) {
+            return 0L;
+        }
 
         Holding sellerHolding = holdingRepository.findByAccountIdAndStockId(
             sellerAccount.getId(),

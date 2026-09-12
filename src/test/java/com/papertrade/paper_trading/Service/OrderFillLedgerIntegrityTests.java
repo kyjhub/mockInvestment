@@ -91,6 +91,11 @@ class OrderFillLedgerIntegrityTests {
         when(executionRepository.save(any())).thenAnswer(call -> call.getArgument(0));
         when(dailyPriceRangeService.updateWithExecutionPrice(anyString(), any(), any()))
             .thenAnswer(call -> call.getArgument(1));
+        // 매칭은 시작 시점에 참가 계좌를 id 순으로 일괄 잠근다. 이 test의 계좌 전부를 후보로 준다.
+        when(orderRepository.findMatchableSellAccountIds(anyLong(), anyLong(), any(), anyList(), any()))
+            .thenAnswer(call -> List.copyOf(accounts.keySet()));
+        when(orderRepository.findMatchableBuyAccountIds(anyLong(), anyLong(), any(), anyList(), any()))
+            .thenAnswer(call -> List.copyOf(accounts.keySet()));
         // 기본값은 "내부 상대 없음". 필요한 테스트에서만 덮어쓴다.
         when(orderRepository.findMatchableSellOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenReturn(List.of());

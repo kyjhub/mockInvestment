@@ -32,6 +32,11 @@ import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -92,6 +97,77 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
 
         assertThat(orderRepository.findById(buyOrder.getId()).orElseThrow().getFilledQuantity())
             .isEqualTo(5L);
+    }
+
+    @Test
+    void crossSymbolMatchingOnTheSameTwoAccountsDoesNotDeadlock() throws Exception {
+        // 데드락이 성립하던 모양을 그대로 만든다.
+        // 종목 A: 계좌1이 매수(계좌2가 매도) / 종목 B: 계좌2가 매수(계좌1이 매도)
+        // 예전에는 매칭이 "자기 계좌 먼저, 상대 계좌 나중"으로 잡아 두 스레드가 서로를 기다렸다.
+        Account account1 = openAccount("10000000.00");
+        Account account2 = openAccount("10000000.00");
+        Stock stockA = persistStock();
+        Stock stockB = persistStock();
+        holdingRepository.save(holdingOf(account2, stockA, 100L, "1000.0000"));
+        holdingRepository.save(holdingOf(account1, stockB, 100L, "1000.0000"));
+
+        persistOrder(account2, stockA, OrderSide.SELL, "1000.0000", 100L);
+        Order buyOnA = persistOrder(account1, stockA, OrderSide.BUY, "1000.0000", 100L);
+        persistOrder(account1, stockB, OrderSide.SELL, "1000.0000", 100L);
+        Order buyOnB = persistOrder(account2, stockB, OrderSide.BUY, "1000.0000", 100L);
+
+        int rounds = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < rounds; round++) {
+                CyclicBarrier barrier = new CyclicBarrier(2);
+                Future<?> first = pool.submit(() -> {
+                    barrier.await(10, TimeUnit.SECONDS);
+                    matchingEngine.matchOrder(buyOnA.getId(), emptyOrderBook(), dailyPriceRange());
+                    return null;
+                });
+                Future<?> second = pool.submit(() -> {
+                    barrier.await(10, TimeUnit.SECONDS);
+                    matchingEngine.matchOrder(buyOnB.getId(), emptyOrderBook(), dailyPriceRange());
+                    return null;
+                });
+                // 데드락이면 PostgreSQL이 한쪽을 abort시켜 예외가 올라온다.
+                first.get(30, TimeUnit.SECONDS);
+                second.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(orderRepository.findById(buyOnA.getId()).orElseThrow().getFilledQuantity()).isEqualTo(100L);
+        assertThat(orderRepository.findById(buyOnB.getId()).orElseThrow().getFilledQuantity()).isEqualTo(100L);
+    }
+
+    @Test
+    void bestPricedCounterpartyWinsEvenWhenItsAccountIdIsHighest() {
+        // 매칭은 시작 시점에 상대 계좌를 상한(10)까지만 미리 잠근다. 그 상한에 걸려 잘려나가는 것은
+        // 반드시 "가격이 나쁜 쪽"이어야 한다. 계좌 id 순으로 고르면 가장 싼 매도자가 id가 높다는
+        // 이유로 제외되어 체결 우선순위가 계좌 id에 좌우된다.
+        Account buyer = openAccount("100000000.00");
+        Stock stock = persistStock();
+
+        // 비싼 매도자를 먼저 만들어 낮은 id를 갖게 한다. 가장 싼 매도자가 마지막 = 가장 높은 id다.
+        int expensiveSellers = 12;
+        for (int i = 0; i < expensiveSellers; i++) {
+            Account seller = openAccount("1000.00");
+            holdingRepository.save(holdingOf(seller, stock, 1L, "1000.0000"));
+            persistOrder(seller, stock, OrderSide.SELL, "9000.0000", 1L);
+        }
+        Account cheapestSeller = openAccount("1000.00");
+        holdingRepository.save(holdingOf(cheapestSeller, stock, 1L, "1000.0000"));
+        persistOrder(cheapestSeller, stock, OrderSide.SELL, "1000.0000", 1L);
+
+        Order buyOrder = persistOrder(buyer, stock, OrderSide.BUY, "9000.0000", 1L);
+        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook(), dailyPriceRange());
+
+        // 가장 싼 1,000에 체결되어야 한다. 9,000에 체결됐다면 상한이 가격 우선순위를 뒤집은 것이다.
+        Account settled = accountRepository.findById(buyer.getId()).orElseThrow();
+        assertThat(settled.getCashBalance()).isEqualByComparingTo("99999000.00");
     }
 
     @Test
