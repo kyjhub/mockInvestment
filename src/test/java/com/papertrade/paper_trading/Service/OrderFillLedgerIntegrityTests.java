@@ -97,9 +97,9 @@ class OrderFillLedgerIntegrityTests {
         when(orderRepository.findMatchableBuyAccountIds(anyLong(), anyLong(), any(), anyList(), any()))
             .thenAnswer(call -> List.copyOf(accounts.keySet()));
         // 기본값은 "내부 상대 없음". 필요한 테스트에서만 덮어쓴다.
-        when(orderRepository.findMatchableSellOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableSellOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenReturn(List.of());
-        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenReturn(List.of());
     }
 
@@ -260,12 +260,12 @@ class OrderFillLedgerIntegrityTests {
     }
 
     private void givenInternalSellOrders(Order... orders) {
-        when(orderRepository.findMatchableSellOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableSellOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenAnswer(call -> matchable(call.getArgument(0), orders));
     }
 
     private void givenInternalBuyOrders(Order... orders) {
-        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenAnswer(call -> matchable(call.getArgument(0), orders));
     }
 

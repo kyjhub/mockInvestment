@@ -24,6 +24,10 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
      * 같은 계좌도 제외한다. 자기 자신과 체결하면 현금은 나갔다 들어와 순변동이 0인데
      * 실현손익은 그대로 적립되고 평균단가도 바뀐다. 가격을 스스로 정할 수 있으므로
      * 원하는 만큼 손익을 만들어낼 수 있는 경로가 된다.
+     *
+     * 미리 잠긴 계좌로도 한정한다. 잠기지 않은 계좌의 주문은 어차피 체결할 수 없는데,
+     * 후보로 돌려주면 호출자가 그 주문 row를 하나씩 잠가 가며 제외 목록에 넣는다.
+     * 체결하지도 못할 주문을 잠그는 셈이라 낭비이자 불필요한 락 경합이다.
      */
 
     Optional<Order> findByAccountIdAndClientOrderId(Long accountId, String clientOrderId);
@@ -36,6 +40,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("""
         select o from Order o
         where o.id not in :excludedOrderIds
+          and o.account.id in :lockedAccountIds
           and o.account.id <> :accountId
           and o.stock.id = :stockId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.SELL
@@ -47,6 +52,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         """)
     List<Order> findMatchableSellOrders(
         @Param("excludedOrderIds") Collection<Long> excludedOrderIds,
+        @Param("lockedAccountIds") Collection<Long> lockedAccountIds,
         @Param("accountId") Long accountId,
         @Param("stockId") Long stockId,
         @Param("maxPrice") BigDecimal maxPrice,
@@ -58,6 +64,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("""
         select o from Order o
         where o.id not in :excludedOrderIds
+          and o.account.id in :lockedAccountIds
           and o.account.id <> :accountId
           and o.stock.id = :stockId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
@@ -69,6 +76,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         """)
     List<Order> findMatchableBuyOrders(
         @Param("excludedOrderIds") Collection<Long> excludedOrderIds,
+        @Param("lockedAccountIds") Collection<Long> lockedAccountIds,
         @Param("accountId") Long accountId,
         @Param("stockId") Long stockId,
         @Param("minPrice") BigDecimal minPrice,

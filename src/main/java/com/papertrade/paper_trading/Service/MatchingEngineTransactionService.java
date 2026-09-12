@@ -63,9 +63,13 @@ public class MatchingEngineTransactionService {
      *
      * <p>많이 잡을수록 더 많은 주문을 한 번에 체결할 수 있지만 그만큼 다른 매칭을 막는다.
      * 잠긴 계좌는 체결 상대가 아니어도 그동안 주문을 낼 수 없다.
-     * 넘어간 계좌의 주문은 다음 매칭에서 다시 후보가 되므로 체결 기회를 잃지는 않는다.
+     *
+     * <p>상한을 넘는 상대가 필요한 큰 주문도 이 스윕 안에서 다 채워진다. {@code matchSymbol()}이
+     * 그 종목의 미체결 주문을 <b>전부</b> 순회하므로, 상한에 밀린 상대들이 각자 자기 차례에 이 주문을
+     * 상대로 체결하기 때문이다. 상한은 "한 트랜잭션이 잠그는 범위"를 정할 뿐 체결 범위를 정하지 않는다.
      */
     private static final int MAX_COUNTERPARTY_ACCOUNTS = 10;
+
     private static final List<OrderStatus> MATCHABLE_STATUSES = List.of(
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
@@ -189,7 +193,7 @@ public class MatchingEngineTransactionService {
         excludedSellOrderIds.add(buyOrder.getId());
 
         while (buyOrder.getRemainingQuantity() > 0) {
-            Order internalSellOrder = bestInternalSellOrder(buyOrder, excludedSellOrderIds);
+            Order internalSellOrder = bestInternalSellOrder(buyOrder, excludedSellOrderIds, lockedAccounts.keySet());
             OrderBookLevel externalAsk = externalLevel(externalAsks, externalAskIndex);
 
             if (internalSellOrder == null && externalAsk == null) {
@@ -281,7 +285,7 @@ public class MatchingEngineTransactionService {
         excludedBuyOrderIds.add(sellOrder.getId());
 
         while (sellOrder.getRemainingQuantity() > 0) {
-            Order internalBuyOrder = bestInternalBuyOrder(sellOrder, excludedBuyOrderIds);
+            Order internalBuyOrder = bestInternalBuyOrder(sellOrder, excludedBuyOrderIds, lockedAccounts.keySet());
             OrderBookLevel externalBid = externalLevel(externalBids, externalBidIndex);
 
             if (internalBuyOrder == null && externalBid == null) {
@@ -505,9 +509,14 @@ public class MatchingEngineTransactionService {
         createExecution(sellOrder, executionPrice, executionQuantity, sellerFees, tradeId, ledgerTransaction);
     }
 
-    private Order bestInternalSellOrder(Order buyOrder, Collection<Long> excludedOrderIds) {
+    private Order bestInternalSellOrder(
+        Order buyOrder,
+        Collection<Long> excludedOrderIds,
+        Collection<Long> lockedAccountIds
+    ) {
         return orderRepository.findMatchableSellOrders(
             excludedOrderIds,
+            lockedAccountIds,
             buyOrder.getAccount().getId(),
             buyOrder.getStock().getId(),
             limitPrice(buyOrder),
@@ -516,9 +525,14 @@ public class MatchingEngineTransactionService {
         ).stream().findFirst().orElse(null);
     }
 
-    private Order bestInternalBuyOrder(Order sellOrder, Collection<Long> excludedOrderIds) {
+    private Order bestInternalBuyOrder(
+        Order sellOrder,
+        Collection<Long> excludedOrderIds,
+        Collection<Long> lockedAccountIds
+    ) {
         return orderRepository.findMatchableBuyOrders(
             excludedOrderIds,
+            lockedAccountIds,
             sellOrder.getAccount().getId(),
             sellOrder.getStock().getId(),
             limitPrice(sellOrder),
