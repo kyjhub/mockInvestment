@@ -662,7 +662,7 @@ SELL:
 
 각 주문은 `TransactionTemplate`을 사용해 별도의 짧은 DB transaction으로 처리한다. 종목 전체를 하나의 큰 transaction으로 묶지 않으므로 한 주문 처리 동안의 row lock 유지 시간을 줄인다.
 
-잔고·보유 수량 부족은 예외로 다루지 않는다. 체결 수량을 정하기 **전에** 그 제약으로 캡을 씌우고, 1주도 체결할 수 없으면 주문을 거절 상태로 종료한다(§13.8). 예외를 던지면 같은 transaction에서 이미 성사된 체결까지 롤백되고, 재시도해도 같은 자리에서 또 막히므로 체결 가능한 물량마저 영영 체결되지 않기 때문이다.
+잔고·보유 수량 부족은 예외로 다루지 않는다. 체결 수량을 정하기 **전에** 그 제약으로 캡을 씌우고, 1주도 체결할 수 없으면 주문을 거절 상태로 종료한다(§13.10). 예외를 던지면 같은 transaction에서 이미 성사된 체결까지 롤백되고, 재시도해도 같은 자리에서 또 막히므로 체결 가능한 물량마저 영영 체결되지 않기 때문이다.
 
 그래서 `matchSymbol()`까지 올라오는 `IllegalArgumentException`은 정상적인 "조건 미달"이 아니라 데이터 불일치 신호다. 그래도 루프는 중단하지 않고 해당 주문만 오류 log를 남긴 뒤 다음 주문을 계속 처리한다 — 중단하면 뒤에 줄 선 정상 주문까지 막힌다. DB 연결 장애 같은 다른 예외는 상위로 전파해 Stream 재시도와 DLQ 경로를 유지한다.
 
@@ -698,7 +698,7 @@ for (id, submittedAt) in 매칭대상목록:
 
 체결에 필요한 물량이 부족해 주문이 부분 체결로 남는 경우에는 그 자리에서 추가로 재조회하지 않는다. WebSocket 담당 종목은 push가 호가 변경 신호를 만들고, 그렇지 않은 종목은 §7.5의 1초 REST polling이 계속 돈다.
 
-내부 주문끼리의 체결(§13.4)은 Toss 호가를 전혀 참조하지 않으므로 이 신선도 규칙의 적용 대상이 아니다.
+내부 주문끼리의 체결(§13.5)은 Toss 호가를 전혀 참조하지 않으므로 이 신선도 규칙의 적용 대상이 아니다.
 
 ### 13.2 주문 row와 계좌 row 잠금
 
@@ -729,7 +729,40 @@ for (id, submittedAt) in 매칭대상목록:
 
 지정가 주문은 주문가격 조건을 만족하는 내부 주문과 외부 호가만 후보로 사용한다. 시장가 주문의 최초 `orderPrice`는 `null`이므로 가격 제한 없이 후보를 선택한다.
 
-### 13.4 내부 주문 체결
+### 13.4 원장 기록
+
+체결·입금 같은 자산 이동은 모두 복식부기 원장에 남는다. `cash_transactions`(단식부기)는 삭제했다.
+
+```text
+ledger_transactions   하나의 경제적 사건. idempotency_key가 unique
+ledger_entries        분개. 한 거래에 2줄 이상, 금액 합계는 항상 0
+```
+
+**불변식**: 거래별 `SUM(amount) = 0`, 전역 `SUM(amount) = 0`. 두 번째가 복식부기를 쓰는 이유다 — 버그로 돈이 생기거나 사라진 것을 탐지하는 유일한 수단이며, 단식부기로는 원리적으로 불가능하다.
+
+부호는 표준 회계를 따른다. 자산 계정(`CASH`, `SECURITIES`)은 증가가 `+`, 수익·자본 계정(`REALIZED_PNL`, `EQUITY_FUNDING`)은 증가가 `−`, 비용 계정(`FEE`, `TAX`)은 발생이 `+`다.
+
+| 사건 | 분개 |
+| --- | --- |
+| 계좌 개설 | `CASH +금액`, `EQUITY_FUNDING −금액` |
+| 외부 호가 매수 | `CASH −대금`, `SECURITIES +대금 (수량 +)` |
+| 외부 호가 매도 | `CASH +대금`, `SECURITIES −취득원가 (수량 −)`, `REALIZED_PNL −(대금−취득원가)` |
+| 내부 체결 | 위 둘을 한 거래에 묶는다. 분개 5줄 |
+| 수수료·세금 | `CASH −금액`, `FEE`/`TAX +금액`. 0이면 분개를 만들지 않는다 |
+
+**실현손익이 원장에서 나온다.** `accounts.realized_profit`은 이제 `−Σ(REALIZED_PNL entries)`로 재계산해 검증할 수 있는 파생 캐시다.
+
+`LedgerPostingService`가 원장에 기록하는 유일한 통로이며 거래 단위 균형을 검증한다. 우회해서 `LedgerEntry`를 직접 저장하면 안 된다.
+
+`balance_after`는 유지되는 잔고 캐시가 있는 계정과목(`CASH`, `SECURITIES`)에만 채운다. 분개마다 전체 이력을 `SUM`하면 원장이 길어질수록 체결이 느려지기 때문이다. 대사는 이 값이 아니라 `SUM(amount)`으로 한다.
+
+**멱등키**: 체결은 `FILL:{tradeId}`, 계좌 개설은 `OPEN:{accountId}`. `executions.trade_id`와 `executions.ledger_transaction_id`가 체결 사실과 원장 거래를 잇는다. 내부 체결은 `Execution` 두 건이 같은 거래를 가리킨다.
+
+`executions.commission` / `tax`는 **표시용 사본이며 계산에 쓰지 않는다.** 잔고·손익의 근거는 언제나 `FEE`/`TAX` 분개다.
+
+`AccountOpeningService`가 계좌 생성과 개시 분개를 한 transaction으로 묶는다. 갈라지면 `cash_balance = Σ(CASH entries)`가 처음부터 성립하지 않는다.
+
+### 13.5 내부 주문 체결
 
 내부 매수자와 내부 매도자가 체결될 때 한 transaction에서 다음을 수행한다.
 
@@ -748,7 +781,7 @@ for (id, submittedAt) in 매칭대상목록:
 
 반환값 0은 "이 상대방과는 체결할 수 없다"는 뜻이다. 호출자는 그 상대를 후보 제외 목록에 넣고 다음 후보로 넘어간다. 제외하지 않으면 같은 후보를 계속 다시 뽑아 무한 loop가 된다. 제외 목록은 `OrderRepository.findMatchableSellOrders()` / `findMatchableBuyOrders()`의 `excludedOrderIds` 파라미터로 전달되며, 호출자가 항상 자기 주문 ID를 넣고 시작하므로 비는 경우가 없다.
 
-### 13.5 Toss 외부 호가 체결
+### 13.6 Toss 외부 호가 체결
 
 외부 ask에 매수 주문이 체결되면 다음을 수행한다.
 
@@ -767,7 +800,7 @@ for (id, submittedAt) in 매칭대상목록:
 - `Execution` 저장
 - 양수 `SELL` 현금 원장 저장
 
-### 13.6 보유 평균단가와 실현손익
+### 13.7 보유 평균단가와 실현손익
 
 매수 시:
 
@@ -788,7 +821,7 @@ realizedProfit += executionAmount - costBasis
 
 금액은 소수점 둘째 자리, 가격은 소수점 넷째 자리 기준으로 반올림한다.
 
-### 13.7 수수료와 세금
+### 13.8 수수료와 세금
 
 `CommissionCalculator` 전략 interface가 있으며 현재 구현체는 `ZeroCommissionCalculator`다.
 
@@ -797,7 +830,7 @@ realizedProfit += executionAmount - costBasis
 
 체결 row에는 계산 결과를 기록한다. 실제 수수료 정책이 결정되면 전략 구현체를 교체할 수 있도록 매칭 엔진과 분리되어 있다.
 
-### 13.8 체결 불가 주문의 거절
+### 13.9 체결 불가 주문의 거절
 
 계좌 조건으로 더 이상 체결될 수 없는 주문은 `PENDING`으로 두지 않고 종료한다. 두지 않는 이유는 30초 안전망 scheduler가 그 주문을 영원히 재발행하는데 결과가 매번 같기 때문이다.
 
@@ -818,7 +851,7 @@ realizedProfit += executionAmount - costBasis
 
 투자금 충전 이후 자동 재체결은 없다. 잔고가 부족했던 주문은 이미 종료되어 있으므로 사용자가 다시 주문해야 한다.
 
-### 13.9 가용잔고(주문가능금액)와 접수 시점 검증
+### 13.10 가용잔고(주문가능금액)와 접수 시점 검증
 
 예수금을 넘는 주문은 **접수 단계에서 거절한다.** 미체결 주문이 묶어 둔 금액을 예수금에서 뺀 것이 주문가능금액이다.
 
@@ -848,11 +881,11 @@ realizedProfit += executionAmount - costBasis
 
 #### 시장가 매수의 구속 단가
 
-`DailyPriceRangeResponse.dailyHighPrice`(당일 고가)를 쓴다. §13.6의 `applyMarketOrderRemainingPrice()`가 시장가 잔여 물량의 대기 가격으로 심는 값과 같아서, 구속 기준이 주문 생애 내내 한 가지로 이어진다.
+`DailyPriceRangeResponse.dailyHighPrice`(당일 고가)를 쓴다. §13.7의 `applyMarketOrderRemainingPrice()`가 시장가 잔여 물량의 대기 가격으로 심는 값과 같아서, 구속 기준이 주문 생애 내내 한 가지로 이어진다.
 
 당일 고가를 구할 수 없으면 **접수를 거절한다.** 구속 금액을 계산할 수 없는 주문을 받아들이면 규칙에 구멍이 생긴다.
 
-당일 고가는 "지금까지 거래된 최고가"지 "오늘 도달 가능한 최고가"가 아니다. 급등 구간에서는 구속이 실제 체결금액보다 작을 수 있는데, 그때는 §13.8의 체결 시점 캡이 방어선이 된다 — 살 수 있는 만큼만 체결되고 잔량은 거절된다. **접수 검증과 체결 검증의 2중 구조**이며, 접수 검증이 생긴 뒤에도 §13.8을 남겨 두는 이유가 이것이다.
+당일 고가는 "지금까지 거래된 최고가"지 "오늘 도달 가능한 최고가"가 아니다. 급등 구간에서는 구속이 실제 체결금액보다 작을 수 있는데, 그때는 §13.9의 체결 시점 캡이 방어선이 된다 — 살 수 있는 만큼만 체결되고 잔량은 거절된다. **접수 검증과 체결 검증의 2중 구조**이며, 접수 검증이 생긴 뒤에도 §13.8을 남겨 두는 이유가 이것이다.
 
 국내 주식은 전일 종가 × 1.3(KONEX × 1.15)이라는 진짜 상한가가 있어 당일 고가보다 안전한 기준이지만, 전일 종가를 구할 경로가 없고 국내 종목 거래 자체가 미구현이라 국내 종목 지원과 함께 다룬다.
 
@@ -876,6 +909,31 @@ realizedProfit += executionAmount - costBasis
 
 수수료·세금 예상액을 구속액에 더한다. 현재 `ZeroCommissionCalculator`라 0이지만 규약은 세워 두었다.
 
+### 13.11 원장 대사
+
+로직이 아무리 정교해도 버그는 난다. 그래서 원장 시스템의 진짜 안전망은 올바르게 쓰는 코드가 아니라 **틀렸다는 것을 반드시 발견하는 장치**다. `LedgerReconciliationService`가 그 장치이며 `ledger.reconciliation.cron`(기본 매일 05:30)으로 돈다.
+
+| # | 검사 | 기준 |
+| --- | --- | --- |
+| 1 | 전역 균형 | `SUM(ledger_entries.amount) = 0` |
+| 2 | 거래 균형 | 거래별 `SUM(amount) = 0` |
+| 3 | 현금 잔고 | `accounts.cash_balance = Σ(CASH entries)` |
+| 4 | 실현손익 | `accounts.realized_profit = −Σ(REALIZED_PNL entries)` |
+| 5 | 보유 수량 | `holdings.quantity = Σ(SECURITIES entries.quantity)` |
+| 6 | 보유 원가 | `holdings.total_purchase_amount = Σ(SECURITIES entries.amount)` |
+| 7 | 수수료 사본 | `Σ(executions.commission) = Σ(FEE entries)` |
+| 8 | 세금 사본 | `Σ(executions.tax) = Σ(TAX entries)` |
+
+1번이 복식부기를 쓰는 이유 그 자체다. 돈이 생기거나 사라진 것을 탐지하는 유일한 수단이며 단식부기로는 원리적으로 불가능하다. 2번이 걸리면 `LedgerPostingService`를 우회해 분개를 저장한 코드가 있다는 뜻이다.
+
+가용잔고는 저장하지 않고 `orders`에서 파생하므로 대사 대상이 아니다(§13.10).
+
+**불일치를 자동으로 덮어쓰지 않는다.** 조용히 맞춰 버리면 버그를 숨기게 된다. `ERROR` 로그와 `ledger.reconciliation.mismatch` metric으로 올리고 사람이 판단한다. 정정이 필요하면 원본을 남긴 채 반대분개를 추가한다.
+
+모든 질의가 **불일치 항목만** 돌려준다. 계좌마다 집계해 비교하면 계좌 수에 비례해 느려지지만, 이 방식은 질의 수가 고정이라 데이터가 늘어도 비용이 검사 항목 수만큼만 늘어난다.
+
+7·8번은 거래 단위가 아니라 **전체 합계**로 비교하므로 서로 상쇄되는 오차는 잡지 못한다. 수수료가 0인 현재는 실질적 제약이 아니다.
+
 ## 14. 현재 영속 데이터 모델
 
 ### 14.1 구현된 엔티티
@@ -891,7 +949,7 @@ realizedProfit += executionAmount - costBasis
 | `Order` | 매수/매도 주문과 체결 상태 |
 | `Execution` | 주문별 개별 체결 |
 | `Holding` | 계좌와 종목별 현재 보유 상태 |
-| `CashTransaction` | 현금 잔고 변경 원장 |
+| `LedgerTransaction` / `LedgerEntry` | 복식부기 원장 |
 | `StockPrice` | 선택적으로 저장할 가격 snapshot |
 | `DailyAccountSnapshot` | 일별 계좌 성과 snapshot |
 | `LeaderboardRanking` | 배치로 생성하는 materialized 랭킹 |
@@ -1040,7 +1098,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-15개 test class에 61개 test가 있다.
+17개 test class에 73개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1055,6 +1113,8 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
 | `OrderFillLedgerIntegrityTests` | 6 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정 |
 | `OrderPlacementReservationIntegrationTest` | 9 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가 구속 단가, 매도가능수량 |
+| `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
+| `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
 | `TossOrderBookWebSocketManagerTests` | 7 | 단위 | 정원, 우선순위, 끈끈한 슬롯, 해제, 거절 종목 제외, 선언 registry 비우기 |
@@ -1072,7 +1132,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-12 기준 `./gradlew test --rerun-tasks`는 **61건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-12 기준 `./gradlew test --rerun-tasks`는 **73건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1080,22 +1140,21 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 다음 항목은 엔티티나 문서에는 정의되어 있지만 완성된 사용자 기능으로 연결되어 있지 않다.
 
-- 회원가입 시 1:1 계좌 자동 생성
-- 초기 모의 투자금 입금과 `INITIAL_DEPOSIT` 원장 생성
+- 회원가입 시 1:1 계좌 자동 생성. `AccountOpeningService.open()`은 있으나 회원가입에 연결되어 있지 않다
 - 투자금 추가 신청 API
 - 하루 1회 투자금 신청 제한
 - 초기화 이후 누적 신청금 5,000,000 제한 계산
 - 누적 수익률, 누적 수익금, 누적 신청금 초기화 API
 - 보유 자산(종목별 평가) 조회 API — 잔고·주문가능금액 조회는 `GET /api/v1/accounts/me/balance`로 구현됨
 - `Account.totalAssetValue` 재평가 및 체결 후 갱신
-- 일별 계좌 snapshot batch
+- 일별 계좌 snapshot batch. `DailyAccountSnapshot`의 `stock_evaluation`·`unrealized_profit`·`return_rate`가 시가 평가를 요구하는데 평가 batch가 아직 없다 (§13.11 대사는 원장 파생만으로 동작하므로 이것과 무관하게 이미 돈다)
 - 리더보드 계산 batch와 조회 API
 - 국내/미국 종목 마스터 적재
 - 환율 API client, cache, 저장과 적용
 - 주문 목록 및 단건 조회 API
 - DLQ 검색, replay, 삭제 관리 API
 - dirty-set metric의 외부 scrape endpoint 노출과 dashboard/alert 구성
-- 수수료와 세금의 실제 현금 반영 정책
+- 수수료와 세금의 실제 현금 반영 정책. 원장 모델(FEE/TAX 분개)과 차감 경로는 있으나 계산기가 0을 반환한다. 0이 아닌 값으로 바꾸려면 체결 시점 잔고 캡이 수수료를 고려하도록 함께 고쳐야 한다
 - 자기 계좌 간 자전거래 차단과 주문가격 제한폭 검증
 - DB migration 또는 schema provisioning 도구
 
@@ -1135,4 +1194,4 @@ Redis 슬롯 lock은 계정의 동시 WebSocket 연결 수를 2개로 제한하�
 
 `application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `SPRING_JPA_DDL_AUTO=update`와 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
 
-다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.reject_reason`(§13.8), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.9)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
+다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.reject_reason`(§13.8), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.10)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.

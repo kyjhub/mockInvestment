@@ -12,9 +12,10 @@ import static org.mockito.Mockito.when;
 import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Repository.AccountRepository;
-import com.papertrade.paper_trading.Repository.CashTransactionRepository;
 import com.papertrade.paper_trading.Repository.ExecutionRepository;
 import com.papertrade.paper_trading.Repository.HoldingRepository;
+import com.papertrade.paper_trading.Repository.LedgerEntryRepository;
+import com.papertrade.paper_trading.Repository.LedgerTransactionRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository.MatchableOrder;
 import java.time.LocalDateTime;
@@ -81,7 +82,7 @@ class MatchingEngineTransactionServiceTests {
             orderRepository,
             mock(ExecutionRepository.class),
             mock(HoldingRepository.class),
-            mock(CashTransactionRepository.class),
+            new LedgerPostingService(mock(LedgerTransactionRepository.class), mock(LedgerEntryRepository.class)),
             mock(DailyPriceRangeService.class),
             orderBookService,
             mock(CommissionCalculator.class),

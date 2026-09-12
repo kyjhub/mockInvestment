@@ -4,27 +4,30 @@ import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookLevel;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Entity.Account;
-import com.papertrade.paper_trading.Entity.CashTransaction;
 import com.papertrade.paper_trading.Entity.Execution;
 import com.papertrade.paper_trading.Entity.Holding;
+import com.papertrade.paper_trading.Entity.LedgerTransaction;
 import com.papertrade.paper_trading.Entity.Order;
-import com.papertrade.paper_trading.Enum.CashTransactionType;
+import com.papertrade.paper_trading.Enum.LedgerAccount;
+import com.papertrade.paper_trading.Enum.LedgerTransactionType;
 import com.papertrade.paper_trading.Enum.OrderSide;
 import com.papertrade.paper_trading.Enum.OrderStatus;
 import com.papertrade.paper_trading.Enum.OrderType;
 import com.papertrade.paper_trading.Repository.AccountRepository;
-import com.papertrade.paper_trading.Repository.CashTransactionRepository;
 import com.papertrade.paper_trading.Repository.ExecutionRepository;
 import com.papertrade.paper_trading.Repository.HoldingRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository.MatchableOrder;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import com.papertrade.paper_trading.Service.LedgerPostingService.Posting;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -50,7 +53,7 @@ public class MatchingEngineTransactionService {
     private final OrderRepository orderRepository;
     private final ExecutionRepository executionRepository;
     private final HoldingRepository holdingRepository;
-    private final CashTransactionRepository cashTransactionRepository;
+    private final LedgerPostingService ledgerPostingService;
     private final DailyPriceRangeService dailyPriceRangeService;
     private final OrderBookService orderBookService;
     private final CommissionCalculator commissionCalculator;
@@ -314,17 +317,39 @@ public class MatchingEngineTransactionService {
 
         BigDecimal executionAmount = money(executionPrice.multiply(BigDecimal.valueOf(executionQuantity)));
         BigDecimal costBasis = sellerHolding.sell(executionQuantity);
+        BigDecimal realizedProfit = executionAmount.subtract(costBasis);
         buyerAccount.debitCash(executionAmount);
         sellerAccount.creditCash(executionAmount);
-        sellerAccount.addRealizedProfit(executionAmount.subtract(costBasis));
+        sellerAccount.addRealizedProfit(realizedProfit);
         buyerHolding.buy(executionQuantity, executionPrice);
         buyOrder.fill(executionQuantity);
         sellOrder.fill(executionQuantity);
 
-        Execution buyExecution = createExecution(buyOrder, executionPrice, executionQuantity);
-        Execution sellExecution = createExecution(sellOrder, executionPrice, executionQuantity);
-        createCashTransaction(buyerAccount, buyOrder, buyExecution, CashTransactionType.BUY, executionAmount.negate());
-        createCashTransaction(sellerAccount, sellOrder, sellExecution, CashTransactionType.SELL, executionAmount);
+        // 분개는 엔티티를 모두 갱신한 뒤에 만든다. balanceAfter가 갱신 후 값이어야 하기 때문이다.
+        List<Posting> postings = new ArrayList<>();
+        postings.add(Posting.cash(buyerAccount, executionAmount.negate()));
+        postings.add(Posting.securities(buyerAccount, buyOrder.getStock(), executionAmount,
+            executionQuantity, buyerHolding.getTotalPurchaseAmount()));
+        postings.add(Posting.cash(sellerAccount, executionAmount));
+        postings.add(Posting.securities(sellerAccount, sellOrder.getStock(), costBasis.negate(),
+            -executionQuantity, sellerHolding.getTotalPurchaseAmount()));
+        postings.add(Posting.of(sellerAccount, LedgerAccount.REALIZED_PNL, realizedProfit.negate()));
+
+        Fees buyerFees = fees(executionPrice, executionQuantity);
+        Fees sellerFees = fees(executionPrice, executionQuantity);
+        addFeePostings(postings, buyerAccount, buyerFees);
+        addFeePostings(postings, sellerAccount, sellerFees);
+
+        String tradeId = UUID.randomUUID().toString();
+        LedgerTransaction ledgerTransaction = ledgerPostingService.post(
+            LedgerTransactionType.TRADE,
+            "FILL:" + tradeId,
+            buyOrder.getStock().getSymbol() + " 내부 체결",
+            postings
+        );
+
+        createExecution(buyOrder, executionPrice, executionQuantity, buyerFees, tradeId, ledgerTransaction);
+        createExecution(sellOrder, executionPrice, executionQuantity, sellerFees, tradeId, ledgerTransaction);
         return executionQuantity;
     }
 
@@ -352,11 +377,26 @@ public class MatchingEngineTransactionService {
             throw new IllegalArgumentException("주문 가능 금액이 부족합니다.");
         }
 
-        Execution execution = createExecution(buyOrder, executionPrice, executionQuantity);
         buyerAccount.debitCash(executionAmount);
         buyerHolding.buy(executionQuantity, executionPrice);
         buyOrder.fill(executionQuantity);
-        createCashTransaction(buyerAccount, buyOrder, execution, CashTransactionType.BUY, executionAmount.negate());
+
+        List<Posting> postings = new ArrayList<>();
+        postings.add(Posting.cash(buyerAccount, executionAmount.negate()));
+        postings.add(Posting.securities(buyerAccount, buyOrder.getStock(), executionAmount,
+            executionQuantity, buyerHolding.getTotalPurchaseAmount()));
+
+        Fees buyerFees = fees(executionPrice, executionQuantity);
+        addFeePostings(postings, buyerAccount, buyerFees);
+
+        String tradeId = UUID.randomUUID().toString();
+        LedgerTransaction ledgerTransaction = ledgerPostingService.post(
+            LedgerTransactionType.TRADE,
+            "FILL:" + tradeId,
+            buyOrder.getStock().getSymbol() + " 매수",
+            postings
+        );
+        createExecution(buyOrder, executionPrice, executionQuantity, buyerFees, tradeId, ledgerTransaction);
     }
 
     private void executeExternalSell(
@@ -368,12 +408,29 @@ public class MatchingEngineTransactionService {
     ) {
         BigDecimal executionAmount = money(executionPrice.multiply(BigDecimal.valueOf(executionQuantity)));
         BigDecimal costBasis = sellerHolding.sell(executionQuantity);
+        BigDecimal realizedProfit = executionAmount.subtract(costBasis);
 
-        Execution execution = createExecution(sellOrder, executionPrice, executionQuantity);
         sellerAccount.creditCash(executionAmount);
-        sellerAccount.addRealizedProfit(executionAmount.subtract(costBasis));
+        sellerAccount.addRealizedProfit(realizedProfit);
         sellOrder.fill(executionQuantity);
-        createCashTransaction(sellerAccount, sellOrder, execution, CashTransactionType.SELL, executionAmount);
+
+        List<Posting> postings = new ArrayList<>();
+        postings.add(Posting.cash(sellerAccount, executionAmount));
+        postings.add(Posting.securities(sellerAccount, sellOrder.getStock(), costBasis.negate(),
+            -executionQuantity, sellerHolding.getTotalPurchaseAmount()));
+        postings.add(Posting.of(sellerAccount, LedgerAccount.REALIZED_PNL, realizedProfit.negate()));
+
+        Fees sellerFees = fees(executionPrice, executionQuantity);
+        addFeePostings(postings, sellerAccount, sellerFees);
+
+        String tradeId = UUID.randomUUID().toString();
+        LedgerTransaction ledgerTransaction = ledgerPostingService.post(
+            LedgerTransactionType.TRADE,
+            "FILL:" + tradeId,
+            sellOrder.getStock().getSymbol() + " 매도",
+            postings
+        );
+        createExecution(sellOrder, executionPrice, executionQuantity, sellerFees, tradeId, ledgerTransaction);
     }
 
     private Order bestInternalSellOrder(Order buyOrder, Collection<Long> excludedOrderIds) {
@@ -483,32 +540,63 @@ public class MatchingEngineTransactionService {
         return orderBook.result().bids();
     }
 
-    private Execution createExecution(Order order, BigDecimal executionPrice, Long executionQuantity) {
+    private Execution createExecution(
+        Order order,
+        BigDecimal executionPrice,
+        Long executionQuantity,
+        Fees fees,
+        String tradeId,
+        LedgerTransaction ledgerTransaction
+    ) {
         return executionRepository.save(Execution.builder()
             .order(order)
             .executionPrice(executionPrice)
             .executionQuantity(executionQuantity)
-            .commission(money(commissionCalculator.calculateCommission(executionPrice, executionQuantity)))
-            .tax(money(commissionCalculator.calculateTax(executionPrice, executionQuantity)))
+            .commission(fees.commission())
+            .tax(fees.tax())
+            .tradeId(tradeId)
+            .ledgerTransaction(ledgerTransaction)
             .build());
     }
 
-    private void createCashTransaction(
-        Account account,
-        Order order,
-        Execution execution,
-        CashTransactionType transactionType,
-        BigDecimal amount
-    ) {
-        cashTransactionRepository.save(CashTransaction.builder()
-            .account(account)
-            .order(order)
-            .execution(execution)
-            .transactionType(transactionType)
-            .amount(money(amount))
-            .balanceAfter(account.getCashBalance())
-            .description(order.getStock().getSymbol() + " " + transactionType.name())
-            .build());
+    private Fees fees(BigDecimal executionPrice, long executionQuantity) {
+        return new Fees(
+            money(commissionCalculator.calculateCommission(executionPrice, executionQuantity)),
+            money(commissionCalculator.calculateTax(executionPrice, executionQuantity))
+        );
+    }
+
+    /**
+     * 수수료·세금을 현금에서 차감하고 비용 분개를 붙인다.
+     *
+     * <p>0이면 아무것도 하지 않는다 — 0원 분개는 정보가 없다. 현재 {@code ZeroCommissionCalculator}라
+     * 항상 이 경로다.
+     *
+     * <p><b>주의</b>: 0이 아닌 계산기로 바꾸면 {@code affordableQuantity()}의 잔고 캡이 수수료를
+     * 고려하지 않아 현금이 모자랄 수 있다. 접수 시점 구속액은 이미 수수료를 포함하지만 체결 시점 캡은
+     * 아직 아니다. 수수료 정책을 켜기 전에 그 캡을 함께 고쳐야 한다.
+     */
+    private void addFeePostings(List<Posting> postings, Account account, Fees fees) {
+        BigDecimal total = fees.total();
+        if (total.signum() <= 0) {
+            return;
+        }
+
+        account.debitCash(total);
+        postings.add(Posting.cash(account, total.negate()));
+        if (fees.commission().signum() > 0) {
+            postings.add(Posting.of(account, LedgerAccount.FEE, fees.commission()));
+        }
+        if (fees.tax().signum() > 0) {
+            postings.add(Posting.of(account, LedgerAccount.TAX, fees.tax()));
+        }
+    }
+
+    private record Fees(BigDecimal commission, BigDecimal tax) {
+
+        BigDecimal total() {
+            return commission.add(tax);
+        }
     }
 
     private BigDecimal money(BigDecimal amount) {

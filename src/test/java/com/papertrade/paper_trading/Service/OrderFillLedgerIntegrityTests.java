@@ -23,9 +23,10 @@ import com.papertrade.paper_trading.Enum.OrderSide;
 import com.papertrade.paper_trading.Enum.OrderStatus;
 import com.papertrade.paper_trading.Enum.OrderType;
 import com.papertrade.paper_trading.Repository.AccountRepository;
-import com.papertrade.paper_trading.Repository.CashTransactionRepository;
 import com.papertrade.paper_trading.Repository.ExecutionRepository;
 import com.papertrade.paper_trading.Repository.HoldingRepository;
+import com.papertrade.paper_trading.Repository.LedgerEntryRepository;
+import com.papertrade.paper_trading.Repository.LedgerTransactionRepository;
 import com.papertrade.paper_trading.Repository.OrderRepository;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -54,8 +55,12 @@ class OrderFillLedgerIntegrityTests {
     private final OrderRepository orderRepository = mock(OrderRepository.class);
     private final ExecutionRepository executionRepository = mock(ExecutionRepository.class);
     private final HoldingRepository holdingRepository = mock(HoldingRepository.class);
-    private final CashTransactionRepository cashTransactionRepository = mock(CashTransactionRepository.class);
     private final DailyPriceRangeService dailyPriceRangeService = mock(DailyPriceRangeService.class);
+    /** 진짜 posting service를 쓴다. 분개 합계가 0이 아니면 모든 체결 테스트가 바로 깨진다. */
+    private final LedgerPostingService ledgerPostingService = new LedgerPostingService(
+        savingMock(LedgerTransactionRepository.class),
+        savingMock(LedgerEntryRepository.class)
+    );
     private final OrderBookService orderBookService = mock(OrderBookService.class);
     private final CommissionCalculator commissionCalculator = new ZeroCommissionCalculator();
 
@@ -71,7 +76,7 @@ class OrderFillLedgerIntegrityTests {
             orderRepository,
             executionRepository,
             holdingRepository,
-            cashTransactionRepository,
+            ledgerPostingService,
             dailyPriceRangeService,
             orderBookService,
             commissionCalculator,
@@ -84,7 +89,6 @@ class OrderFillLedgerIntegrityTests {
             .thenAnswer(call -> Optional.ofNullable(holdings.get(call.getArgument(0, Long.class))));
         when(holdingRepository.save(any())).thenAnswer(call -> call.getArgument(0));
         when(executionRepository.save(any())).thenAnswer(call -> call.getArgument(0));
-        when(cashTransactionRepository.save(any())).thenAnswer(call -> call.getArgument(0));
         when(dailyPriceRangeService.updateWithExecutionPrice(anyString(), any(), any()))
             .thenAnswer(call -> call.getArgument(1));
         // 기본값은 "내부 상대 없음". 필요한 테스트에서만 덮어쓴다.
@@ -186,6 +190,14 @@ class OrderFillLedgerIntegrityTests {
 
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.PENDING);
         assertThat(buyOrder.getRejectReason()).isNull();
+    }
+
+    /** save()가 인자를 그대로 돌려주는 repository mock. */
+    private static <T> T savingMock(Class<T> type) {
+        T repository = mock(type);
+        when(((org.springframework.data.repository.CrudRepository<?, ?>) repository).save(any()))
+            .thenAnswer(call -> call.getArgument(0));
+        return repository;
     }
 
     // --- fixtures ---

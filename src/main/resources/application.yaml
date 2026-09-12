@@ -77,6 +77,11 @@ orderbook:
     refresh-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_REFRESH_MS:5000}
     ttl-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_TTL_MS:30000}
 
+ledger:
+  reconciliation:
+    # 원장과 파생 캐시(잔고·보유·실현손익)가 맞는지 검증한다. 불일치를 고치지 않고 보고만 한다.
+    cron: ${LEDGER_RECONCILIATION_CRON:0 30 5 * * *}
+
 market-data:
   polling:
     scheduler:
