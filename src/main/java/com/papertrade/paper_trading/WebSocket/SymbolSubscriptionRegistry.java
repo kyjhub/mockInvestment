@@ -8,7 +8,9 @@ import java.util.Set;
 
 public class SymbolSubscriptionRegistry {
 
+    // Map<sessionId, Map<subscriptionId, symbol>>
     private final Map<String, Map<String, String>> sessionSubscriptions = new HashMap<>();
+    // Map<symbol, Set<subscriberKey>>
     private final Map<String, Set<String>> symbolSubscriptions = new HashMap<>();
 
     public synchronized void subscribe(String sessionId, String subscriptionId, String symbol) {

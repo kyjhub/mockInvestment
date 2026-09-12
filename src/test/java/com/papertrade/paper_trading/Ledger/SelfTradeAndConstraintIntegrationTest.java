@@ -2,6 +2,9 @@ package com.papertrade.paper_trading.Ledger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 
 import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
@@ -26,6 +29,7 @@ import com.papertrade.paper_trading.Repository.StockRepository;
 import com.papertrade.paper_trading.Repository.UserRepository;
 import com.papertrade.paper_trading.Service.AccountOpeningService;
 import com.papertrade.paper_trading.Service.MatchingEngineTransactionService;
+import com.papertrade.paper_trading.Service.OrderBookService;
 import com.papertrade.paper_trading.support.ApplicationIntegrationTest;
 import com.papertrade.paper_trading.support.IntegrationTestContainers;
 import jakarta.persistence.EntityManager;
@@ -40,6 +44,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -61,6 +66,9 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
     @Autowired private HoldingRepository holdingRepository;
     @Autowired private OrderRepository orderRepository;
     @Autowired private EntityManager entityManager;
+
+    /** 이 test는 내부 주문끼리의 체결만 본다. 외부 호가는 없다. */
+    @MockitoBean private OrderBookService orderBookService;
 
     @Test
     void anAccountCannotTradeWithItself() {
@@ -171,6 +179,30 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
     }
 
     @Test
+    void anOrderNeedingMoreCounterpartiesThanTheLockLimitStillFillsInOneSweep() {
+        // 한 트랜잭션이 잠그는 상대 계좌는 10개까지인데 25개가 필요한 주문이다.
+        // 그래도 한 스윕에서 다 채워져야 한다 — matchSymbol()이 그 종목의 미체결 주문을 전부
+        // 순회하므로, 상한에 밀린 매도자들이 각자 자기 차례에 이 매수 주문을 상대로 체결한다.
+        // 계좌 상한은 "한 트랜잭션이 잠그는 범위"를 정할 뿐 체결 범위를 정하지 않는다.
+        Account buyer = openAccount("100000000.00");
+        Stock stock = persistStock();
+
+        int sellers = 25;
+        for (int i = 0; i < sellers; i++) {
+            Account seller = openAccount("1000.00");
+            holdingRepository.save(holdingOf(seller, stock, 4L, "1000.0000"));
+            persistOrder(seller, stock, OrderSide.SELL, "1000.0000", 4L);
+        }
+
+        Order buyOrder = persistOrder(buyer, stock, OrderSide.BUY, "1000.0000", 100L);
+        matchSymbolFor(stock);
+
+        // 25계좌 × 4주 = 100주. 한 번의 스윕에서 전부 체결되어야 한다.
+        assertThat(orderRepository.findById(buyOrder.getId()).orElseThrow().getFilledQuantity())
+            .isEqualTo(100L);
+    }
+
+    @Test
     @Transactional
     void databaseRejectsANegativeCashBalance() {
         // 체결 시점 캡이 유일한 방어선이면, 캡 계산이 깨지는 순간 음수 잔고가 조용히 저장된다.
@@ -199,6 +231,12 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
                 .executeUpdate();
             entityManager.flush();
         }).isInstanceOf(Exception.class);
+    }
+
+    /** 종목 전체 스윕. matchOrder를 직접 부르면 계좌 상한까지만 체결된다. */
+    private void matchSymbolFor(Stock stock) {
+        when(orderBookService.getOrderBookForMatching(anyString(), any())).thenReturn(emptyOrderBook());
+        matchingEngine.matchSymbol(stock.getSymbol(), dailyPriceRange());
     }
 
     // --- fixtures ---
