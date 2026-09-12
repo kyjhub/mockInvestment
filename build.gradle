@@ -34,6 +34,10 @@ dependencies {
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
 	testImplementation 'org.springframework.security:spring-security-test'
+	// 원장 불변식과 가용잔고 경합은 실제 transaction·row lock 없이는 검증할 수 없다.
+	// H2로는 PESSIMISTIC_WRITE의 실제 차단과 @Check 위반 시점을 재현하지 못해 운영과 같은 PostgreSQL을 띄운다.
+	testImplementation 'org.testcontainers:junit-jupiter'
+	testImplementation 'org.testcontainers:postgresql'
 	testCompileOnly 'org.projectlombok:lombok'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 	testAnnotationProcessor 'org.projectlombok:lombok'
@@ -41,4 +45,16 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+	// 벤치마크는 처리량 측정이 목적이라 통과/실패를 가리는 test가 아니고,
+	// docker compose 를 55432/56379 로 직접 띄운 환경을 전제한다. 일반 test 실행에서 뺀다.
+	exclude '**/benchmark/**'
+}
+
+tasks.register('benchmarkTest', Test) {
+	description = '트랜잭션 경계 처리량 벤치마크. docker compose 를 55432/56379 로 띄운 뒤 실행한다.'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	include '**/benchmark/**'
 }
