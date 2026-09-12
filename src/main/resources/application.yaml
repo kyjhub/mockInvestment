@@ -83,6 +83,13 @@ order:
     # 미국 시장에는 일일 가격제한폭이 없으므로 규제 한도가 아니라 오입력 방지 장치다.
     margin: ${ORDER_PRICE_BAND_MARGIN:0.3}
 
+valuation:
+  total-asset:
+    # accounts.total_asset_value 갱신 주기. 표시용 값이라 분 단위로 충분하다.
+    fixed-delay-ms: ${VALUATION_TOTAL_ASSET_DELAY_MS:60000}
+  scheduler:
+    pool-size: ${VALUATION_SCHEDULER_POOL_SIZE:1}
+
 ledger:
   reconciliation:
     # 원장과 파생 캐시(잔고·보유·실현손익)가 맞는지 검증한다. 불일치를 고치지 않고 보고만 한다.
