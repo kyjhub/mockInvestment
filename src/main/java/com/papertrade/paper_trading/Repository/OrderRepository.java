@@ -113,6 +113,55 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     );
 
     /**
+     * 이 매수 주문과 체결될 수 있는 상대 <b>계좌</b> id. 가격순이 아니라 <b>계좌 id 오름차순</b>이다.
+     *
+     * <p>매칭 트랜잭션이 잡을 계좌 락을 시작 시점에 전부 알아내기 위한 조회다. 락 없이 읽고
+     * 그 결과를 id 순서로 잠그면, 모든 트랜잭션의 계좌 락 획득 순서가 같아져 순환이 생기지 않는다.
+     *
+     * <p>락을 걸지 않는다. 여기서 걸면 순서를 정하려고 하는 일을 순서 없이 해버리는 셈이다.
+     */
+    @Query("""
+        select distinct o.account.id
+        from Order o
+        where o.account.id <> :accountId
+          and o.stock.id = :stockId
+          and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.SELL
+          and o.status in :statuses
+          and o.remainingQuantity > 0
+          and o.orderPrice is not null
+          and (:maxPrice is null or o.orderPrice <= :maxPrice)
+        order by o.account.id asc
+        """)
+    List<Long> findMatchableSellAccountIds(
+        @Param("accountId") Long accountId,
+        @Param("stockId") Long stockId,
+        @Param("maxPrice") BigDecimal maxPrice,
+        @Param("statuses") Collection<OrderStatus> statuses,
+        Pageable pageable
+    );
+
+    /** {@link #findMatchableSellAccountIds}의 매도 주문용 대칭. */
+    @Query("""
+        select distinct o.account.id
+        from Order o
+        where o.account.id <> :accountId
+          and o.stock.id = :stockId
+          and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
+          and o.status in :statuses
+          and o.remainingQuantity > 0
+          and o.orderPrice is not null
+          and (:minPrice is null or o.orderPrice >= :minPrice)
+        order by o.account.id asc
+        """)
+    List<Long> findMatchableBuyAccountIds(
+        @Param("accountId") Long accountId,
+        @Param("stockId") Long stockId,
+        @Param("minPrice") BigDecimal minPrice,
+        @Param("statuses") Collection<OrderStatus> statuses,
+        Pageable pageable
+    );
+
+    /**
      * 미체결 매수 주문이 예수금에서 구속하고 있는 금액.
      *
      * <p>가용잔고를 컬럼으로 저장하지 않고 여기서 파생한다. 컬럼으로 두면 체결·취소·거절마다 해제

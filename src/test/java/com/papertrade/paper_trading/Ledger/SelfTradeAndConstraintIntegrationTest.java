@@ -32,6 +32,11 @@ import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -92,6 +97,50 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
 
         assertThat(orderRepository.findById(buyOrder.getId()).orElseThrow().getFilledQuantity())
             .isEqualTo(5L);
+    }
+
+    @Test
+    void crossSymbolMatchingOnTheSameTwoAccountsDoesNotDeadlock() throws Exception {
+        // 데드락이 성립하던 모양을 그대로 만든다.
+        // 종목 A: 계좌1이 매수(계좌2가 매도) / 종목 B: 계좌2가 매수(계좌1이 매도)
+        // 예전에는 매칭이 "자기 계좌 먼저, 상대 계좌 나중"으로 잡아 두 스레드가 서로를 기다렸다.
+        Account account1 = openAccount("10000000.00");
+        Account account2 = openAccount("10000000.00");
+        Stock stockA = persistStock();
+        Stock stockB = persistStock();
+        holdingRepository.save(holdingOf(account2, stockA, 100L, "1000.0000"));
+        holdingRepository.save(holdingOf(account1, stockB, 100L, "1000.0000"));
+
+        persistOrder(account2, stockA, OrderSide.SELL, "1000.0000", 100L);
+        Order buyOnA = persistOrder(account1, stockA, OrderSide.BUY, "1000.0000", 100L);
+        persistOrder(account1, stockB, OrderSide.SELL, "1000.0000", 100L);
+        Order buyOnB = persistOrder(account2, stockB, OrderSide.BUY, "1000.0000", 100L);
+
+        int rounds = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < rounds; round++) {
+                CyclicBarrier barrier = new CyclicBarrier(2);
+                Future<?> first = pool.submit(() -> {
+                    barrier.await(10, TimeUnit.SECONDS);
+                    matchingEngine.matchOrder(buyOnA.getId(), emptyOrderBook(), dailyPriceRange());
+                    return null;
+                });
+                Future<?> second = pool.submit(() -> {
+                    barrier.await(10, TimeUnit.SECONDS);
+                    matchingEngine.matchOrder(buyOnB.getId(), emptyOrderBook(), dailyPriceRange());
+                    return null;
+                });
+                // 데드락이면 PostgreSQL이 한쪽을 abort시켜 예외가 올라온다.
+                first.get(30, TimeUnit.SECONDS);
+                second.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(orderRepository.findById(buyOnA.getId()).orElseThrow().getFilledQuantity()).isEqualTo(100L);
+        assertThat(orderRepository.findById(buyOnB.getId()).orElseThrow().getFilledQuantity()).isEqualTo(100L);
     }
 
     @Test
