@@ -130,8 +130,10 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
     }
 
     private Order persistOrder(OrderSide side, String price, long quantity) {
+        BigDecimal unitPrice = new BigDecimal(price);
         Order order = orderRepository.save(Order.create(
-            account, stock, null, side, OrderType.LIMIT, new BigDecimal(price), quantity));
+            account, stock, null, side, OrderType.LIMIT, unitPrice, quantity,
+            side == OrderSide.BUY ? unitPrice : null));
         entityManager.flush();
         return order;
     }

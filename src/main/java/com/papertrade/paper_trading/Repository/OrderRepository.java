@@ -104,6 +104,43 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         @Param("statuses") Collection<OrderStatus> statuses
     );
 
+    /**
+     * 미체결 매수 주문이 예수금에서 구속하고 있는 금액.
+     *
+     * <p>가용잔고를 컬럼으로 저장하지 않고 여기서 파생한다. 컬럼으로 두면 체결·취소·거절마다 해제
+     * 코드를 넣어야 하고, 하나라도 빠지면 그 금액이 영구히 묶인다. 어긋났는지 확인하려면 결국 아래 쿼리로
+     * 대사해야 하는데, 그럴 거면 컬럼을 둘 이유가 읽기 속도밖에 남지 않는다.
+     * 주문에서 파생하면 해제 경로라는 것이 존재하지 않는다 — 체결되면 remainingQuantity가 줄고
+     * 취소·거절되면 status가 빠지면서 합계에서 자동으로 사라진다.
+     */
+    @Query("""
+        select coalesce(sum(o.reservedUnitPrice * o.remainingQuantity), 0)
+        from Order o
+        where o.account.id = :accountId
+          and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
+          and o.status in :statuses
+          and o.reservedUnitPrice is not null
+        """)
+    BigDecimal sumReservedCash(
+        @Param("accountId") Long accountId,
+        @Param("statuses") Collection<OrderStatus> statuses
+    );
+
+    /** 미체결 매도 주문이 묶어 둔 수량. 종목 단위다. */
+    @Query("""
+        select coalesce(sum(o.remainingQuantity), 0)
+        from Order o
+        where o.account.id = :accountId
+          and o.stock.id = :stockId
+          and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.SELL
+          and o.status in :statuses
+        """)
+    long sumReservedQuantity(
+        @Param("accountId") Long accountId,
+        @Param("stockId") Long stockId,
+        @Param("statuses") Collection<OrderStatus> statuses
+    );
+
     record MatchableOrder(Long id, LocalDateTime submittedAt) {
     }
 
