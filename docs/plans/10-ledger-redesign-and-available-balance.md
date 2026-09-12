@@ -343,6 +343,9 @@ public OrderResponse placeOrder(User user, OrderPlaceRequest request) {
 
 `DailyAccountSnapshot`에 영업일 종료 시점의 `cash_balance`, `realized_profit`, `unrealized_profit`, 보유 평가액을 확정 저장한다. 이후 대사는 전체 원장이 아니라 **직전 스냅샷 + 그 이후 분개**로 수행할 수 있어 원장이 길어져도 비용이 일정하게 유지된다.
 
+> **보류**: 이 스냅샷은 시가 평가를 요구하는데 그건 이번 범위에서 제외한 항목이다. 그리고 6.1의 질의가
+> 불일치 항목만 돌려주는 고정 개수 aggregate라 비용 문제도 아직 없다. 구현 순서 14번 참고.
+
 ## 7. 통합 테스트 기반 — 이 계획과 함께 깐다
 
 원장 불변식(`잔고 = Σ원장`)과 가용잔고 경합은 **실제 transaction과 row lock 없이는 검증할 수 없다.** Mockito 단위 테스트는 분기 로직만 고정할 뿐, "두 요청이 동시에 들어와도 예수금을 넘지 못한다"를 증명하지 못한다. 그래서 테스트 기반을 이 계획의 1단계로 넣는다.
@@ -419,10 +422,21 @@ ledger:
 
 **설계 변경 하나**: 계획에는 시장가 구속 단가를 집계 시점에 계산하는 것으로 되어 있었으나, 그러면 계좌 row lock을 쥔 채 시세를 조회하게 된다. `orders.reserved_unit_price` 컬럼을 두어 접수 시점에 한 번 정하고, 집계는 외부 의존 없는 순수 SQL이 되게 했다. 주문의 불변 속성이라 드리프트 위험은 없다. 자세한 내용은 `current-implementation-overview.md` §13.9.
 
-**C. 대사와 마감**
+**C. 대사와 마감** — **13번 구현 완료, 14번 보류 (2026-09-12)**
 
-13. 대사 batch(6.1)와 metric.
-14. 일별 스냅샷 batch(6.2).
+13. ~~대사 batch(6.1)와 metric.~~ `LedgerReconciliationService`. 8개 검사 전부, 불일치 항목만 돌려주는 질의.
+14. **일별 스냅샷 batch(6.2) — 지금 구현할 수 없다.**
+
+    `DailyAccountSnapshot`은 `stock_evaluation`, `unrealized_profit`, `return_rate`가 모두 not null인데
+    셋 다 **시가 평가**를 요구한다. 그런데 미실현손익 평가는 이 계획이 "이번 범위에서 제외"로 명시한
+    항목이다(환율까지 얽힌다). 취득원가를 평가액 자리에 넣으면 컬럼의 의미와 다른 값이 들어가므로
+    안 넣느니만 못하다.
+
+    6.2가 내세운 목적(대사 비용을 일정하게 유지)도 지금은 해당하지 않는다. 13번의 질의가 전부
+    불일치 항목만 돌려주는 고정 개수 aggregate라, 원장이 길어져도 검사 항목 수만큼만 늘어난다.
+    체크포인트가 필요해지는 시점은 그 aggregate가 느려질 때다.
+
+    평가 batch가 생기면 그때 함께 다룬다.
 
 ## 검증 방법
 

@@ -909,6 +909,31 @@ realizedProfit += executionAmount - costBasis
 
 수수료·세금 예상액을 구속액에 더한다. 현재 `ZeroCommissionCalculator`라 0이지만 규약은 세워 두었다.
 
+### 13.11 원장 대사
+
+로직이 아무리 정교해도 버그는 난다. 그래서 원장 시스템의 진짜 안전망은 올바르게 쓰는 코드가 아니라 **틀렸다는 것을 반드시 발견하는 장치**다. `LedgerReconciliationService`가 그 장치이며 `ledger.reconciliation.cron`(기본 매일 05:30)으로 돈다.
+
+| # | 검사 | 기준 |
+| --- | --- | --- |
+| 1 | 전역 균형 | `SUM(ledger_entries.amount) = 0` |
+| 2 | 거래 균형 | 거래별 `SUM(amount) = 0` |
+| 3 | 현금 잔고 | `accounts.cash_balance = Σ(CASH entries)` |
+| 4 | 실현손익 | `accounts.realized_profit = −Σ(REALIZED_PNL entries)` |
+| 5 | 보유 수량 | `holdings.quantity = Σ(SECURITIES entries.quantity)` |
+| 6 | 보유 원가 | `holdings.total_purchase_amount = Σ(SECURITIES entries.amount)` |
+| 7 | 수수료 사본 | `Σ(executions.commission) = Σ(FEE entries)` |
+| 8 | 세금 사본 | `Σ(executions.tax) = Σ(TAX entries)` |
+
+1번이 복식부기를 쓰는 이유 그 자체다. 돈이 생기거나 사라진 것을 탐지하는 유일한 수단이며 단식부기로는 원리적으로 불가능하다. 2번이 걸리면 `LedgerPostingService`를 우회해 분개를 저장한 코드가 있다는 뜻이다.
+
+가용잔고는 저장하지 않고 `orders`에서 파생하므로 대사 대상이 아니다(§13.10).
+
+**불일치를 자동으로 덮어쓰지 않는다.** 조용히 맞춰 버리면 버그를 숨기게 된다. `ERROR` 로그와 `ledger.reconciliation.mismatch` metric으로 올리고 사람이 판단한다. 정정이 필요하면 원본을 남긴 채 반대분개를 추가한다.
+
+모든 질의가 **불일치 항목만** 돌려준다. 계좌마다 집계해 비교하면 계좌 수에 비례해 느려지지만, 이 방식은 질의 수가 고정이라 데이터가 늘어도 비용이 검사 항목 수만큼만 늘어난다.
+
+7·8번은 거래 단위가 아니라 **전체 합계**로 비교하므로 서로 상쇄되는 오차는 잡지 못한다. 수수료가 0인 현재는 실질적 제약이 아니다.
+
 ## 14. 현재 영속 데이터 모델
 
 ### 14.1 구현된 엔티티
@@ -1073,7 +1098,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-16개 test class에 68개 test가 있다.
+17개 test class에 73개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1088,6 +1113,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
 | `OrderFillLedgerIntegrityTests` | 6 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정 |
 | `OrderPlacementReservationIntegrationTest` | 9 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가 구속 단가, 매도가능수량 |
+| `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
 | `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
@@ -1106,7 +1132,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-12 기준 `./gradlew test --rerun-tasks`는 **68건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-12 기준 `./gradlew test --rerun-tasks`는 **73건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1121,7 +1147,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - 누적 수익률, 누적 수익금, 누적 신청금 초기화 API
 - 보유 자산(종목별 평가) 조회 API — 잔고·주문가능금액 조회는 `GET /api/v1/accounts/me/balance`로 구현됨
 - `Account.totalAssetValue` 재평가 및 체결 후 갱신
-- 일별 계좌 snapshot batch
+- 일별 계좌 snapshot batch. `DailyAccountSnapshot`의 `stock_evaluation`·`unrealized_profit`·`return_rate`가 시가 평가를 요구하는데 평가 batch가 아직 없다 (§13.11 대사는 원장 파생만으로 동작하므로 이것과 무관하게 이미 돈다)
 - 리더보드 계산 batch와 조회 API
 - 국내/미국 종목 마스터 적재
 - 환율 API client, cache, 저장과 적용
