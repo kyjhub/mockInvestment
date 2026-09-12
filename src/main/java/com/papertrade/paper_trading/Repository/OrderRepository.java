@@ -113,15 +113,22 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     );
 
     /**
-     * 이 매수 주문과 체결될 수 있는 상대 <b>계좌</b> id. 가격순이 아니라 <b>계좌 id 오름차순</b>이다.
+     * 이 매수 주문과 체결될 수 있는 상대 계좌 id를 <b>가격-시간 우선순위 순서로</b> 돌려준다.
      *
      * <p>매칭 트랜잭션이 잡을 계좌 락을 시작 시점에 전부 알아내기 위한 조회다. 락 없이 읽고
-     * 그 결과를 id 순서로 잠그면, 모든 트랜잭션의 계좌 락 획득 순서가 같아져 순환이 생기지 않는다.
+     * 그 결과를 id 순서로 잠그면 모든 트랜잭션의 계좌 락 획득 순서가 같아져 순환이 생기지 않는다.
+     *
+     * <p><b>정렬은 반드시 매칭과 같은 우선순위여야 한다.</b> 계좌 id 순으로 고르면, 후보가 상한을
+     * 넘겼을 때 가장 좋은 가격의 상대가 id가 높다는 이유로 잠기지 않아 제외된다. 체결 우선순위가
+     * 계좌 id에 좌우되는 셈이다. 잠그는 순서와 고르는 순서는 다른 문제다.
+     *
+     * <p>{@code distinct}를 쓰지 않는 이유는 {@code SELECT DISTINCT}가 정렬 기준을 select 목록에
+     * 요구하기 때문이다. 중복은 호출자가 우선순위를 유지한 채 제거한다.
      *
      * <p>락을 걸지 않는다. 여기서 걸면 순서를 정하려고 하는 일을 순서 없이 해버리는 셈이다.
      */
     @Query("""
-        select distinct o.account.id
+        select o.account.id
         from Order o
         where o.account.id <> :accountId
           and o.stock.id = :stockId
@@ -130,7 +137,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
           and o.remainingQuantity > 0
           and o.orderPrice is not null
           and (:maxPrice is null or o.orderPrice <= :maxPrice)
-        order by o.account.id asc
+        order by o.orderPrice asc, o.submittedAt asc
         """)
     List<Long> findMatchableSellAccountIds(
         @Param("accountId") Long accountId,
@@ -142,7 +149,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 
     /** {@link #findMatchableSellAccountIds}의 매도 주문용 대칭. */
     @Query("""
-        select distinct o.account.id
+        select o.account.id
         from Order o
         where o.account.id <> :accountId
           and o.stock.id = :stockId
@@ -151,7 +158,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
           and o.remainingQuantity > 0
           and o.orderPrice is not null
           and (:minPrice is null or o.orderPrice >= :minPrice)
-        order by o.account.id asc
+        order by o.orderPrice desc, o.submittedAt asc
         """)
     List<Long> findMatchableBuyAccountIds(
         @Param("accountId") Long accountId,

@@ -721,6 +721,12 @@ for (id, submittedAt) in 매칭대상목록:
 
 **미리 잠기지 않은 계좌의 주문은 이번 매칭에서 상대로 쓰지 않는다.** 락 없이 읽은 뒤 상태가 바뀌었거나 후보 계좌 수 상한(10)을 넘긴 경우인데, 그 주문은 다음 매칭에서 다시 후보가 된다. 순서를 지키려고 나중에 낮은 id를 잡는 것보다 한 번 거르는 쪽이 안전하다.
 
+**후보를 고르는 순서와 잠그는 순서는 다른 문제다.** 고르는 것은 §13.3의 가격-시간 우선순위로 하고, 잠그는 것만 id 오름차순으로 한다. 계좌 id 순으로 고르면 상한에 걸렸을 때 가장 좋은 가격의 상대가 id가 높다는 이유로 제외되어, 체결 우선순위가 계좌 id에 좌우된다.
+
+**잠긴 계좌는 체결 상대가 아니어도 그동안 주문을 낼 수 없다.** 주문 접수도 계좌 row를 잠그기 때문이다(§13.11). 후보 상한이 이 비용을 조절하는 손잡이다 — 크게 잡으면 한 번에 더 많이 체결하지만 그만큼 다른 매칭과 주문 접수를 막는다.
+
+트랜잭션 안에서 Toss를 호출하지는 않는다. `updateWithExecutionPrice()`는 프리페치한 범위를 받으면 시세를 다시 조회하지 않는다. 다만 호가 범위가 바뀐 체결마다 Redis 캐시 쓰기와 Pub/Sub 발행이 락을 쥔 채 일어난다.
+
 주문 row 락은 순환하지 않는다. 매칭은 종목 단위이고 심볼 락이 같은 종목의 동시 매칭을 막으므로, 서로 다른 매칭이 같은 주문을 잡을 일이 없다. 보유 row 락도 이미 잠근 계좌의 것만 잡으므로 계좌 락 순서를 따른다.
 
 ### 13.3 내부 주문과 외부 호가 비교
@@ -1128,7 +1134,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-18개 test class에 81개 test가 있다.
+18개 test class에 82개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1144,7 +1150,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `OrderFillLedgerIntegrityTests` | 6 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정 |
 | `OrderPlacementReservationIntegrationTest` | 12 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가 구속 단가, 매도가능수량, 주문가격 밴드 |
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
-| `SelfTradeAndConstraintIntegrationTest` | 5 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 음수 잔고·보유 DB 거부 |
+| `SelfTradeAndConstraintIntegrationTest` | 6 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 후보 상한이 가격 우선순위를 뒤집지 않음, 음수 잔고·보유 DB 거부 |
 | `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
@@ -1163,7 +1169,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-12 기준 `./gradlew test --rerun-tasks`는 **81건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-12 기준 `./gradlew test --rerun-tasks`는 **82건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 

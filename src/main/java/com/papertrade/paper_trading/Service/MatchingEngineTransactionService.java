@@ -26,12 +26,14 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -49,12 +51,21 @@ public class MatchingEngineTransactionService {
     private static final int MONEY_SCALE = 2;
     private static final Pageable FIRST_MATCHABLE_ORDER = PageRequest.of(0, 1);
     /**
+     * 상대 계좌를 고르기 위해 훑어볼 주문 수.
+     *
+     * <p>가격-시간 우선순위 순으로 읽어 앞에서부터 계좌를 모은다. 한 계좌가 여러 주문을 낼 수 있어
+     * 주문 수는 계좌 수보다 넉넉해야 한다.
+     */
+    private static final Pageable COUNTERPARTY_SCAN_LIMIT = PageRequest.of(0, 100);
+
+    /**
      * 한 매칭이 미리 잠글 상대 계좌 수 상한.
      *
      * <p>많이 잡을수록 더 많은 주문을 한 번에 체결할 수 있지만 그만큼 다른 매칭을 막는다.
+     * 잠긴 계좌는 체결 상대가 아니어도 그동안 주문을 낼 수 없다.
      * 넘어간 계좌의 주문은 다음 매칭에서 다시 후보가 되므로 체결 기회를 잃지는 않는다.
      */
-    private static final Pageable COUNTERPARTY_ACCOUNT_LIMIT = PageRequest.of(0, 10);
+    private static final int MAX_COUNTERPARTY_ACCOUNTS = 10;
     private static final List<OrderStatus> MATCHABLE_STATUSES = List.of(
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
@@ -130,15 +141,20 @@ public class MatchingEngineTransactionService {
      */
     private Map<Long, Account> lockParticipantAccounts(Order incomingOrder) {
         Long incomingAccountId = incomingOrder.getAccount().getId();
-        List<Long> counterpartyAccountIds = incomingOrder.getOrderSide() == OrderSide.BUY
+        List<Long> scannedAccountIds = incomingOrder.getOrderSide() == OrderSide.BUY
             ? orderRepository.findMatchableSellAccountIds(
                 incomingAccountId, incomingOrder.getStock().getId(), limitPrice(incomingOrder),
-                MATCHABLE_STATUSES, COUNTERPARTY_ACCOUNT_LIMIT)
+                MATCHABLE_STATUSES, COUNTERPARTY_SCAN_LIMIT)
             : orderRepository.findMatchableBuyAccountIds(
                 incomingAccountId, incomingOrder.getStock().getId(), limitPrice(incomingOrder),
-                MATCHABLE_STATUSES, COUNTERPARTY_ACCOUNT_LIMIT);
+                MATCHABLE_STATUSES, COUNTERPARTY_SCAN_LIMIT);
 
-        SortedSet<Long> orderedAccountIds = new TreeSet<>(counterpartyAccountIds);
+        // 우선순위를 유지한 채 중복을 제거하고 상한까지 자른다. 상한에 걸려 잘려나가는 것은
+        // 가격이 나쁜 쪽이어야 한다 — 그래서 조회를 가격-시간 순으로 받는다.
+        Set<Long> counterpartyAccountIds = new LinkedHashSet<>(scannedAccountIds);
+        SortedSet<Long> orderedAccountIds = counterpartyAccountIds.stream()
+            .limit(MAX_COUNTERPARTY_ACCOUNTS)
+            .collect(Collectors.toCollection(TreeSet::new));
         orderedAccountIds.add(incomingAccountId);
 
         Map<Long, Account> lockedAccounts = new HashMap<>();

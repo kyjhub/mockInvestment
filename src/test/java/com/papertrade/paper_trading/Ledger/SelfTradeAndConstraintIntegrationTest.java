@@ -144,6 +144,33 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
     }
 
     @Test
+    void bestPricedCounterpartyWinsEvenWhenItsAccountIdIsHighest() {
+        // 매칭은 시작 시점에 상대 계좌를 상한(10)까지만 미리 잠근다. 그 상한에 걸려 잘려나가는 것은
+        // 반드시 "가격이 나쁜 쪽"이어야 한다. 계좌 id 순으로 고르면 가장 싼 매도자가 id가 높다는
+        // 이유로 제외되어 체결 우선순위가 계좌 id에 좌우된다.
+        Account buyer = openAccount("100000000.00");
+        Stock stock = persistStock();
+
+        // 비싼 매도자를 먼저 만들어 낮은 id를 갖게 한다. 가장 싼 매도자가 마지막 = 가장 높은 id다.
+        int expensiveSellers = 12;
+        for (int i = 0; i < expensiveSellers; i++) {
+            Account seller = openAccount("1000.00");
+            holdingRepository.save(holdingOf(seller, stock, 1L, "1000.0000"));
+            persistOrder(seller, stock, OrderSide.SELL, "9000.0000", 1L);
+        }
+        Account cheapestSeller = openAccount("1000.00");
+        holdingRepository.save(holdingOf(cheapestSeller, stock, 1L, "1000.0000"));
+        persistOrder(cheapestSeller, stock, OrderSide.SELL, "1000.0000", 1L);
+
+        Order buyOrder = persistOrder(buyer, stock, OrderSide.BUY, "9000.0000", 1L);
+        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook(), dailyPriceRange());
+
+        // 가장 싼 1,000에 체결되어야 한다. 9,000에 체결됐다면 상한이 가격 우선순위를 뒤집은 것이다.
+        Account settled = accountRepository.findById(buyer.getId()).orElseThrow();
+        assertThat(settled.getCashBalance()).isEqualByComparingTo("99999000.00");
+    }
+
+    @Test
     @Transactional
     void databaseRejectsANegativeCashBalance() {
         // 체결 시점 캡이 유일한 방어선이면, 캡 계산이 깨지는 순간 음수 잔고가 조용히 저장된다.
