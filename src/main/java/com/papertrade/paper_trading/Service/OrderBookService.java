@@ -9,6 +9,7 @@ import com.papertrade.paper_trading.Config.RedisPubSubConfig;
 import com.papertrade.paper_trading.Dto.OrderBookPubSubMessage;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
+import com.papertrade.paper_trading.WebSocket.DeclaredWebSocketSymbolRegistry;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -31,6 +32,7 @@ public class OrderBookService {
     private final ObjectMapper objectMapper;
     private final OrderBookCacheProperties cacheProperties;
     private final DirtyOrderBookSymbolRegistry dirtySymbolRegistry;
+    private final DeclaredWebSocketSymbolRegistry declaredSymbolRegistry;
 
     public OrderBookResponse getOrderBook(String symbol) {
         OrderBookResponse cachedResponse = getCachedOrderBook(symbol);
@@ -41,11 +43,32 @@ public class OrderBookService {
         return fetchCacheAndPublish(symbol);
     }
 
-    public OrderBookResponse getOrderBookNoOlderThan(String symbol, LocalDateTime notBefore) {
+    /**
+     * 체결에 쓸 호가.
+     *
+     * <p>WebSocket 구독 종목은 캐시를 그대로 쓴다. 토스는 호가가 <b>바뀔 때만</b> 프레임을 보내므로,
+     * {@code receivedAt}이 주문 접수보다 앞선다는 건 낡았다는 뜻이 아니라 그 이후로 변동이 없었다는 뜻이다.
+     * REST를 불러도 같은 값을 받고, 오히려 왕복 지연만큼 낡은 응답이 {@code receivedAt=now}로 덮어써서
+     * 신선도 메타데이터만 망가진다.
+     *
+     * <p>이 등식은 피드가 살아 있을 때만 성립한다. 판정에 {@code coveredSymbols}가 아니라
+     * {@link DeclaredWebSocketSymbolRegistry}를 쓰는 이유가 그것이다 — 연결 실패·error frame·슬롯 상실·
+     * 구독 ACK 불일치 모두에서 선언이 비워지므로, 피드가 죽으면 그 순간부터 REST 경로로 돌아온다.
+     *
+     * <p>구독 종목인데 캐시가 없으면 {@code null}을 돌려준다. 아직 첫 프레임도 폴링 씨딩도 오지 않은 짧은
+     * 구간이고, 이번 라운드는 외부 유동성 없이(내부 체결만) 넘어간다. 씨딩은 {@code OrderBookPollingService}가
+     * 1초 주기로 이미 하고 있다 — {@code isFresherThan()}이 캐시 null을 "신선하지 않음"으로 보기 때문이다.
+     *
+     * <p>비구독 종목은 기존 규칙 그대로다. 캐시가 {@code notBefore} 이후 값이 아니면 Toss를 호출한다.
+     */
+    public OrderBookResponse getOrderBookForMatching(String symbol, LocalDateTime notBefore) {
         OrderBookResponse cachedResponse = getCachedOrderBook(symbol);
-        if (cachedResponse != null
-            && cachedResponse.receivedAt() != null
-            && !cachedResponse.receivedAt().isBefore(notBefore)) {
+
+        if (declaredSymbolRegistry.isDeclared(symbol)) {
+            return cachedResponse;
+        }
+
+        if (cachedResponse != null && cachedResponse.receivedAt() != null && !cachedResponse.receivedAt().isBefore(notBefore)) {
             return cachedResponse;
         }
 
