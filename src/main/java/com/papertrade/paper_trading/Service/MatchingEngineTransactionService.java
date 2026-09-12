@@ -436,6 +436,7 @@ public class MatchingEngineTransactionService {
     private Order bestInternalSellOrder(Order buyOrder, Collection<Long> excludedOrderIds) {
         return orderRepository.findMatchableSellOrders(
             excludedOrderIds,
+            buyOrder.getAccount().getId(),
             buyOrder.getStock().getId(),
             limitPrice(buyOrder),
             MATCHABLE_STATUSES,
@@ -446,6 +447,7 @@ public class MatchingEngineTransactionService {
     private Order bestInternalBuyOrder(Order sellOrder, Collection<Long> excludedOrderIds) {
         return orderRepository.findMatchableBuyOrders(
             excludedOrderIds,
+            sellOrder.getAccount().getId(),
             sellOrder.getStock().getId(),
             limitPrice(sellOrder),
             MATCHABLE_STATUSES,

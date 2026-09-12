@@ -43,6 +43,8 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
     private static final List<OrderStatus> MATCHABLE =
         List.of(OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED);
     private static final AtomicLong SEQUENCE = new AtomicLong();
+    /** 자전거래 차단 때문에 후보 조회는 "다른 계좌" 기준이어야 한다. */
+    private static final Long OTHER_ACCOUNT_ID = -999L;
 
     @Autowired
     private OrderRepository orderRepository;
@@ -65,12 +67,12 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
         Order nextCheapest = persistOrder(OrderSide.SELL, "110.0000", 10L);
 
         List<Order> withoutExclusion = orderRepository.findMatchableSellOrders(
-            Set.of(-1L), stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
+            Set.of(-1L), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
         assertThat(withoutExclusion).extracting(Order::getId).containsExactly(cheapest.getId());
 
         // 체결 불가로 판명된 상대를 제외하면 다음 후보가 나와야 한다. 무한 loop를 막는 장치다.
         List<Order> withExclusion = orderRepository.findMatchableSellOrders(
-            Set.of(cheapest.getId()), stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
+            Set.of(cheapest.getId()), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
         assertThat(withExclusion).extracting(Order::getId).containsExactly(nextCheapest.getId());
     }
 
@@ -81,7 +83,7 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
 
         // 지정가 120이면 130짜리는 후보가 아니다.
         List<Order> candidates = orderRepository.findMatchableSellOrders(
-            Set.of(-1L), stock.getId(), new BigDecimal("120.0000"), MATCHABLE, PageRequest.of(0, 10));
+            Set.of(-1L), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("120.0000"), MATCHABLE, PageRequest.of(0, 10));
 
         assertThat(candidates).extracting(Order::getId).containsExactly(cheapest.getId());
     }
@@ -92,7 +94,7 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
         persistOrder(OrderSide.BUY, "100.0000", 10L);
 
         List<Order> candidates = orderRepository.findMatchableBuyOrders(
-            Set.of(-1L), stock.getId(), new BigDecimal("90.0000"), MATCHABLE, FIRST);
+            Set.of(-1L), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("90.0000"), MATCHABLE, FIRST);
 
         assertThat(candidates).extracting(Order::getId).containsExactly(highest.getId());
     }
