@@ -208,6 +208,43 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     }
 
     @Test
+    void limitOrderFarOutsideTheDailyRangeIsRejected() {
+        // 가격을 스스로 정해 손익을 만들어내는 경로를 좁힌다. 같은 계좌끼리는 매칭에서 막히지만,
+        // 계정을 여러 개 만들어 터무니없는 가격에 맞붙이는 것은 이 검증이 막는다.
+        when(dailyPriceRangeService.getDailyPriceRange(anyString())).thenReturn(
+            new DailyPriceRangeResponse(stock.getSymbol(), null,
+                new BigDecimal("110.0000"), new BigDecimal("90.0000"), "USD"));
+
+        assertThatThrownBy(() -> orderTradingService.placeOrder(user, buyLimit("100000.0000", 1L)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("주문가격이 허용 범위를 벗어났습니다.");
+    }
+
+    @Test
+    void limitOrderInsideTheBandIsAccepted() {
+        // 저가 매수를 걸어 두는 것은 정상 거래다. 밴드가 이걸 막으면 안 된다.
+        when(dailyPriceRangeService.getDailyPriceRange(anyString())).thenReturn(
+            new DailyPriceRangeResponse(stock.getSymbol(), null,
+                new BigDecimal("110.0000"), new BigDecimal("90.0000"), "USD"));
+
+        // 하한은 90 × 0.7 = 63
+        orderTradingService.placeOrder(user, buyLimit("70.0000", 1L));
+
+        assertThat(acceptedOrderCount()).isEqualTo(1L);
+    }
+
+    @Test
+    void priceBandIsSkippedWhenTheDailyRangeIsUnavailable() {
+        // 외부 시세가 잠깐 막혔다고 정상 주문까지 거절하면 손해가 더 크다.
+        when(dailyPriceRangeService.getDailyPriceRange(anyString())).thenReturn(
+            new DailyPriceRangeResponse(stock.getSymbol(), null, null, null, "USD"));
+
+        orderTradingService.placeOrder(user, buyLimit("100000.0000", 1L));
+
+        assertThat(acceptedOrderCount()).isEqualTo(1L);
+    }
+
+    @Test
     void marketBuyIsRejectedWhenTheDailyHighPriceIsUnknown() {
         when(dailyPriceRangeService.getDailyPriceRange(anyString()))
             .thenReturn(new DailyPriceRangeResponse(stock.getSymbol(), null, null, null, "USD"));

@@ -18,6 +18,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.Check;
 import org.hibernate.annotations.UpdateTimestamp;
 
 @Getter
@@ -26,6 +27,9 @@ import org.hibernate.annotations.UpdateTimestamp;
     name = "holdings",
     uniqueConstraints = @UniqueConstraint(columnNames = {"account_id", "stock_id"})
 )
+// 보유 수량과 취득원가는 음수가 될 수 없다. Holding.sell()이 이미 막지만,
+// 그 검사를 우회하는 경로가 생기면 DB가 마지막으로 거부한다.
+@Check(constraints = "quantity >= 0 and total_purchase_amount >= 0")
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
 @Builder

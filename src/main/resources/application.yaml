@@ -77,6 +77,12 @@ orderbook:
     refresh-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_REFRESH_MS:5000}
     ttl-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_TTL_MS:30000}
 
+order:
+  price-band:
+    # 지정가 주문가격이 당일 거래 범위에서 벗어날 수 있는 비율.
+    # 미국 시장에는 일일 가격제한폭이 없으므로 규제 한도가 아니라 오입력 방지 장치다.
+    margin: ${ORDER_PRICE_BAND_MARGIN:0.3}
+
 ledger:
   reconciliation:
     # 원장과 파생 캐시(잔고·보유·실현손익)가 맞는지 검증한다. 불일치를 고치지 않고 보고만 한다.

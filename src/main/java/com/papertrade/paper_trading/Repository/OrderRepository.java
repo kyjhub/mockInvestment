@@ -20,6 +20,10 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
      * 매칭 후보 조회는 자기 주문(incoming)뿐 아니라 "이번 스윕에서 체결 불가로 판명된 상대"도 제외한다.
      * 제외하지 않으면 같은 후보를 계속 다시 뽑아 무한 루프가 된다.
      * 호출자가 항상 자기 주문 id를 넣고 시작하므로 컬렉션이 비는 경우는 없다.
+     *
+     * 같은 계좌도 제외한다. 자기 자신과 체결하면 현금은 나갔다 들어와 순변동이 0인데
+     * 실현손익은 그대로 적립되고 평균단가도 바뀐다. 가격을 스스로 정할 수 있으므로
+     * 원하는 만큼 손익을 만들어낼 수 있는 경로가 된다.
      */
 
     Optional<Order> findByAccountIdAndClientOrderId(Long accountId, String clientOrderId);
@@ -32,6 +36,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("""
         select o from Order o
         where o.id not in :excludedOrderIds
+          and o.account.id <> :accountId
           and o.stock.id = :stockId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.SELL
           and o.status in :statuses
@@ -42,6 +47,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         """)
     List<Order> findMatchableSellOrders(
         @Param("excludedOrderIds") Collection<Long> excludedOrderIds,
+        @Param("accountId") Long accountId,
         @Param("stockId") Long stockId,
         @Param("maxPrice") BigDecimal maxPrice,
         @Param("statuses") Collection<OrderStatus> statuses,
@@ -52,6 +58,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("""
         select o from Order o
         where o.id not in :excludedOrderIds
+          and o.account.id <> :accountId
           and o.stock.id = :stockId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
           and o.status in :statuses
@@ -62,6 +69,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         """)
     List<Order> findMatchableBuyOrders(
         @Param("excludedOrderIds") Collection<Long> excludedOrderIds,
+        @Param("accountId") Long accountId,
         @Param("stockId") Long stockId,
         @Param("minPrice") BigDecimal minPrice,
         @Param("statuses") Collection<OrderStatus> statuses,

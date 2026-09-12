@@ -26,7 +26,9 @@ import org.hibernate.annotations.UpdateTimestamp;
 @Getter
 @Entity
 @Table(name = "accounts")
-@Check(constraints = "current_round > 0")
+// 애플리케이션 캡이 유일한 방어선이면, 캡 계산이 깨지는 순간 음수 잔고가 조용히 저장된다.
+// realized_profit은 손실이면 음수가 정상이므로 제약하지 않는다.
+@Check(constraints = "current_round > 0 and cash_balance >= 0")
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
 @Builder
