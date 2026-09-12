@@ -80,26 +80,23 @@ class OrderFillLedgerIntegrityTests {
             dailyPriceRangeService,
             orderBookService,
             commissionCalculator,
-            mock(PlatformTransactionManager.class)
+            passThroughTransactionManager()
         );
 
         when(accountRepository.findByIdForUpdate(anyLong()))
             .thenAnswer(call -> Optional.ofNullable(accounts.get(call.getArgument(0, Long.class))));
         when(holdingRepository.findByAccountIdAndStockId(anyLong(), anyLong()))
             .thenAnswer(call -> Optional.ofNullable(holdings.get(call.getArgument(0, Long.class))));
+        when(holdingRepository.findForJudgementByAccountIdAndStockId(anyLong(), anyLong()))
+            .thenAnswer(call -> Optional.ofNullable(holdings.get(call.getArgument(0, Long.class))));
         when(holdingRepository.save(any())).thenAnswer(call -> call.getArgument(0));
         when(executionRepository.save(any())).thenAnswer(call -> call.getArgument(0));
         when(dailyPriceRangeService.updateWithExecutionPrice(anyString(), any(), any()))
             .thenAnswer(call -> call.getArgument(1));
-        // 매칭은 시작 시점에 참가 계좌를 id 순으로 일괄 잠근다. 이 test의 계좌 전부를 후보로 준다.
-        when(orderRepository.findMatchableSellAccountIds(anyLong(), anyLong(), any(), anyList(), any()))
-            .thenAnswer(call -> List.copyOf(accounts.keySet()));
-        when(orderRepository.findMatchableBuyAccountIds(anyLong(), anyLong(), any(), anyList(), any()))
-            .thenAnswer(call -> List.copyOf(accounts.keySet()));
         // 기본값은 "내부 상대 없음". 필요한 테스트에서만 덮어쓴다.
-        when(orderRepository.findMatchableSellOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableSellOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenReturn(List.of());
-        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenReturn(List.of());
     }
 
@@ -205,6 +202,25 @@ class OrderFillLedgerIntegrityTests {
         return repository;
     }
 
+    /** 체결 단위 트랜잭션을 그대로 실행만 시킨다. 경계 동작이 아니라 체결 로직을 보는 test다. */
+    private PlatformTransactionManager passThroughTransactionManager() {
+        return new PlatformTransactionManager() {
+            @Override
+            public org.springframework.transaction.TransactionStatus getTransaction(
+                org.springframework.transaction.TransactionDefinition definition) {
+                return new org.springframework.transaction.support.SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(org.springframework.transaction.TransactionStatus status) {
+            }
+
+            @Override
+            public void rollback(org.springframework.transaction.TransactionStatus status) {
+            }
+        };
+    }
+
     // --- fixtures ---
 
     private Account account(Long id, String cash) {
@@ -260,12 +276,12 @@ class OrderFillLedgerIntegrityTests {
     }
 
     private void givenInternalSellOrders(Order... orders) {
-        when(orderRepository.findMatchableSellOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableSellOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenAnswer(call -> matchable(call.getArgument(0), orders));
     }
 
     private void givenInternalBuyOrders(Order... orders) {
-        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
+        when(orderRepository.findMatchableBuyOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenAnswer(call -> matchable(call.getArgument(0), orders));
     }
 

@@ -67,12 +67,12 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
         Order nextCheapest = persistOrder(OrderSide.SELL, "110.0000", 10L);
 
         List<Order> withoutExclusion = orderRepository.findMatchableSellOrders(
-            Set.of(-1L), lockedAccountIds(), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
+            Set.of(-1L), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
         assertThat(withoutExclusion).extracting(Order::getId).containsExactly(cheapest.getId());
 
         // 체결 불가로 판명된 상대를 제외하면 다음 후보가 나와야 한다. 무한 loop를 막는 장치다.
         List<Order> withExclusion = orderRepository.findMatchableSellOrders(
-            Set.of(cheapest.getId()), lockedAccountIds(), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
+            Set.of(cheapest.getId()), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("200.0000"), MATCHABLE, FIRST);
         assertThat(withExclusion).extracting(Order::getId).containsExactly(nextCheapest.getId());
     }
 
@@ -83,7 +83,7 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
 
         // 지정가 120이면 130짜리는 후보가 아니다.
         List<Order> candidates = orderRepository.findMatchableSellOrders(
-            Set.of(-1L), lockedAccountIds(), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("120.0000"), MATCHABLE, PageRequest.of(0, 10));
+            Set.of(-1L), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("120.0000"), MATCHABLE, PageRequest.of(0, 10));
 
         assertThat(candidates).extracting(Order::getId).containsExactly(cheapest.getId());
     }
@@ -94,7 +94,7 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
         persistOrder(OrderSide.BUY, "100.0000", 10L);
 
         List<Order> candidates = orderRepository.findMatchableBuyOrders(
-            Set.of(-1L), lockedAccountIds(), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("90.0000"), MATCHABLE, FIRST);
+            Set.of(-1L), OTHER_ACCOUNT_ID, stock.getId(), new BigDecimal("90.0000"), MATCHABLE, FIRST);
 
         assertThat(candidates).extracting(Order::getId).containsExactly(highest.getId());
     }
@@ -129,11 +129,6 @@ class OrderMatchingQueryIntegrationTest extends IntegrationTestContainers {
             orderRepository.save(broken);
             entityManager.flush();
         }).isInstanceOf(Exception.class);
-    }
-
-    /** 매칭은 미리 잠근 계좌로만 후보를 좁힌다. 이 test는 자기 계좌 하나뿐이다. */
-    private java.util.Collection<Long> lockedAccountIds() {
-        return Set.of(account.getId());
     }
 
     private Order persistOrder(OrderSide side, String price, long quantity) {
