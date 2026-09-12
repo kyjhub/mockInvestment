@@ -17,6 +17,7 @@ public class SchedulingConfig {
     public static final String MARKET_DATA_POLLING_SCHEDULER = "marketDataPollingScheduler";
     public static final String DIRTY_DRAIN_SCHEDULER = "dirtyDrainScheduler";
     public static final String WEBSOCKET_SCHEDULER = "webSocketScheduler";
+    public static final String VALUATION_SCHEDULER = "valuationScheduler";
 
     /**
      * {@link org.springframework.scheduling.config.TaskSchedulerRouter}가 스케줄러를 찾을 때 쓰는 기본 빈 이름.
@@ -32,6 +33,9 @@ public class SchedulingConfig {
 
     @Value("${matching-engine.dirty-drain.pool-size:2}")
     private int dirtyDrainPoolSize;
+
+    @Value("${valuation.scheduler.pool-size:1}")
+    private int valuationPoolSize;
 
     /**
      * 기본 스케줄러를 직접 정의한다.
@@ -76,6 +80,15 @@ public class SchedulingConfig {
     @Bean(WEBSOCKET_SCHEDULER)
     public TaskScheduler webSocketScheduler() {
         return threadPoolTaskScheduler(1, "toss-ws-");
+    }
+
+    /**
+     * 평가는 계좌 수에 비례하는 작업이라 기본 풀에 두면 다른 주기 작업을 밀어낸다.
+     * 병렬 처리가 목적이 아니라 격리가 목적이므로 1이면 충분하다.
+     */
+    @Bean(VALUATION_SCHEDULER)
+    public TaskScheduler valuationScheduler() {
+        return threadPoolTaskScheduler(valuationPoolSize, "valuation-");
     }
 
     private TaskScheduler threadPoolTaskScheduler(int poolSize, String threadNamePrefix) {

@@ -2,6 +2,7 @@ package com.papertrade.paper_trading.Repository;
 
 import com.papertrade.paper_trading.Entity.Holding;
 import jakarta.persistence.LockModeType;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -20,6 +21,21 @@ public interface HoldingRepository extends JpaRepository<Holding, Long> {
      * 그래서 매칭 중에는 이 값이 우리 자신 말고는 바뀌지 않는다. 판정에만 쓰고 실제 체결은
      * {@link #findByAccountIdAndStockId}로 잠그고 한다.
      */
+    /**
+     * 평가 대상 보유. 수량이 0인 row는 매도로 비워진 뒤 남은 것이라 대상이 아니다.
+     *
+     * <p>{@code join fetch}로 계좌와 종목을 함께 읽는다. 평가는 계좌별로 묶고 종목별 시세를 붙여야 해서
+     * lazy로 두면 보유 수만큼 추가 질의가 나간다.
+     */
+    @Query("select h from Holding h join fetch h.account join fetch h.stock where h.quantity > 0")
+    List<Holding> findOpenPositions();
+
+    @Query("""
+        select h from Holding h join fetch h.stock
+        where h.account.id = :accountId and h.quantity > 0
+        """)
+    List<Holding> findOpenPositionsByAccountId(@Param("accountId") Long accountId);
+
     @Query("select h from Holding h where h.account.id = :accountId and h.stock.id = :stockId")
     Optional<Holding> findForJudgementByAccountIdAndStockId(
         @Param("accountId") Long accountId,
