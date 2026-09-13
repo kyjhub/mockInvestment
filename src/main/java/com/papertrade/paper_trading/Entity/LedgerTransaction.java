@@ -9,6 +9,7 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
@@ -34,8 +35,19 @@ import org.hibernate.annotations.CreationTimestamp;
 @Builder
 public class LedgerTransaction {
 
+    /**
+     * {@code SEQUENCE}를 쓰는 이유는 <b>JDBC 배치</b> 때문이다.
+     *
+     * <p>{@code IDENTITY}면 Hibernate가 생성된 키를 INSERT 직후 받아야 해서 INSERT를 모을 수 없다.
+     * 체결 1건이 원장에 6행을 쓰므로 그대로 6번의 DB 왕복이 된다. 측정해 보니 체결 1건의 15.9%를
+     * 여기에 쓰고 있었다(docs/load-test-candidates.md ④).
+     *
+     * <p>{@code allocationSize = 50}이면 pooled optimizer가 시퀀스 왕복을 50건에 한 번으로 줄인다.
+     * <b>DB 시퀀스의 increment와 반드시 같아야 한다.</b> 어긋나면 id가 겹친다.
+     */
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "ledger_transactions_seq")
+    @SequenceGenerator(name = "ledger_transactions_seq", sequenceName = "ledger_transactions_seq", allocationSize = 50)
     private Long id;
 
     @Enumerated(EnumType.STRING)

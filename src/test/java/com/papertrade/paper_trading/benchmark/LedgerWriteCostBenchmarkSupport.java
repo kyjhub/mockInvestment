@@ -101,7 +101,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
     @Autowired private DataSource dataSource;
     @PersistenceContext private EntityManager entityManager;
 
-    private enum Variant { SINGLE, DOUBLE_JPA, DOUBLE_JPA_SEQ, DOUBLE_JDBC, DOUBLE_BATCH }
+    private enum Variant { SINGLE, DOUBLE_JPA_IDENTITY, DOUBLE_JPA, DOUBLE_JDBC, DOUBLE_BATCH }
 
     protected void printComparisonTable() throws Exception {
         createSingleEntryTable();
@@ -139,7 +139,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
         long single = sequential.get(Variant.SINGLE).p50Us();
         long jpa = sequential.get(Variant.DOUBLE_JPA).p50Us();
         long batch = sequential.get(Variant.DOUBLE_BATCH).p50Us();
-        long jpaSeq = sequential.get(Variant.DOUBLE_JPA_SEQ).p50Us();
+        long identity = sequential.get(Variant.DOUBLE_JPA_IDENTITY).p50Us();
 
         System.out.printf("%n== 체결 1건 전체(내부 체결, 외부 호출 없음) 중앙값 = %d us ==%n", fillUs);
         System.out.println("변형\t\t쓰기(us)\t체결 1건 중 비중");
@@ -147,16 +147,14 @@ abstract class LedgerWriteCostBenchmarkSupport {
             long write = sequential.get(variant).p50Us();
             System.out.printf("%-14s\t%d\t\t%.1f%%%n", variant, write, write * 100.0 / fillUs);
         }
-        System.out.printf("%n복식부기의 순수 대가   (SINGLE→DOUBLE_BATCH) = %+d us  체결의 %.1f%%%n",
-            batch - single, (batch - single) * 100.0 / fillUs);
-        System.out.printf("현재 구조의 추가 비용 (DOUBLE_BATCH→DOUBLE_JPA) = %+d us  체결의 %.1f%%%n",
+        System.out.printf("%n복식부기의 순수 대가 (SINGLE→DOUBLE_JPA) = %+d us  체결의 %.1f%%%n",
+            jpa - single, (jpa - single) * 100.0 / fillUs);
+        System.out.printf("%n원장 쓰기  IDENTITY %d us → SEQUENCE+배치 %d us  (%.1f%% 단축, %.2f배)%n",
+            identity, jpa, (identity - jpa) * 100.0 / identity, identity / (double) jpa);
+        System.out.printf("체결 1건  %d us → %d us  (처리량 %.2fx)%n",
+            fillUs, fillUs - (identity - jpa), fillUs / (double) (fillUs - (identity - jpa)));
+        System.out.printf("남은 JDBC 대비 여지 = %d us (체결의 %.1f%%)%n",
             jpa - batch, (jpa - batch) * 100.0 / fillUs);
-        System.out.printf("%n[선택지] JPA+SEQUENCE+배치 : 체결 %d us → %d us  (처리량 %.2fx)%n",
-            fillUs, fillUs - (jpa - jpaSeq), fillUs / (double) (fillUs - (jpa - jpaSeq)));
-        System.out.printf("[선택지] JDBC 배치         : 체결 %d us → %d us  (처리량 %.2fx)%n",
-            fillUs, fillUs - (jpa - batch), fillUs / (double) (fillUs - (jpa - batch)));
-        System.out.printf("두 선택지의 차이 = %d us (체결의 %.1f%%)%n",
-            jpaSeq - batch, (jpaSeq - batch) * 100.0 / fillUs);
         System.out.println();
     }
 
@@ -262,7 +260,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
         switch (variant) {
             case SINGLE -> writeSingleEntry(fixture);
             case DOUBLE_JPA -> writeDoubleViaJpa(fixture, key);
-            case DOUBLE_JPA_SEQ -> writeDoubleViaJpaWithSequence(fixture, key);
+            case DOUBLE_JPA_IDENTITY -> writeDoubleViaJpaWithIdentity(fixture, key);
             case DOUBLE_JDBC -> writeDoubleViaJdbc(fixture, key, false);
             case DOUBLE_BATCH -> writeDoubleViaJdbc(fixture, key, true);
         }
@@ -313,16 +311,13 @@ abstract class LedgerWriteCostBenchmarkSupport {
     }
 
     /**
-     * JPA를 그대로 두고 ID 전략만 {@code SEQUENCE}로 바꾼 경우. 배치가 켜진다.
+     * <b>옛 구조 대조군.</b> ID 전략만 {@code IDENTITY}인 엔티티에 같은 6행을 쓴다.
      *
-     * <p>{@code IDENTITY}에서는 Hibernate가 생성 키를 INSERT 직후 받아야 해서 배치를 못 한다.
-     * {@code SEQUENCE}면 id를 미리 알 수 있어 INSERT를 모았다가 flush 시점에 묶어 보낸다.
-     * pooled optimizer(allocationSize=50)라 시퀀스 왕복도 50건에 한 번이다.
-     *
-     * <p>이 변형이 답하는 질문: <b>JdbcTemplate까지 가지 않고 ID 전략만 바꿔도 되는가.</b>
-     * 왕복은 줄지만 영속성 컨텍스트 오버헤드는 남으므로 DOUBLE_BATCH까지는 못 간다.
+     * <p>{@code IDENTITY}면 Hibernate가 생성 키를 INSERT 직후 받아야 해서 배치를 못 하고 6행이
+     * 6번의 왕복이 된다. 운영 엔티티를 {@code SEQUENCE}로 전환한 뒤에도 전후 비교를 이어가려고
+     * 남겨 둔 변형이다.
      */
-    private void writeDoubleViaJpaWithSequence(Fixture fixture, String key) {
+    private void writeDoubleViaJpaWithIdentity(Fixture fixture, String key) {
         Account account = entityManager.getReference(Account.class, fixture.accountId());
         Stock stock = entityManager.getReference(Stock.class, fixture.stockId());
         BenchLedgerTransaction transaction = new BenchLedgerTransaction("TRADE", key, "benchmark");
@@ -345,8 +340,8 @@ abstract class LedgerWriteCostBenchmarkSupport {
             long transactionId;
             try (PreparedStatement statement = connection.prepareStatement(
                 "insert into ledger_transactions"
-                    + " (transaction_type, idempotency_key, occurred_at, description)"
-                    + " values (?, ?, now(), ?) returning id")) {
+                    + " (id, transaction_type, idempotency_key, occurred_at, description)"
+                    + " values (nextval('bench_jdbc_tx_seq'), ?, ?, now(), ?) returning id")) {
                 statement.setString(1, "TRADE");
                 statement.setString(2, key);
                 statement.setString(3, "benchmark");
@@ -358,9 +353,9 @@ abstract class LedgerWriteCostBenchmarkSupport {
 
             try (PreparedStatement statement = connection.prepareStatement(
                 "insert into ledger_entries"
-                    + " (transaction_id, account_id, ledger_account, stock_id, amount, quantity,"
-                    + "  balance_after, created_at)"
-                    + " values (?, ?, ?, ?, ?, ?, ?, now())")) {
+                    + " (id, transaction_id, account_id, ledger_account, stock_id, amount,"
+                    + "  quantity, balance_after, created_at)"
+                    + " values (nextval('bench_jdbc_entry_seq'), ?, ?, ?, ?, ?, ?, ?, now())")) {
                 for (int i = 0; i < ENTRIES_PER_FILL; i++) {
                     statement.setLong(1, transactionId);
                     statement.setLong(2, fixture.accountId());
@@ -419,6 +414,13 @@ abstract class LedgerWriteCostBenchmarkSupport {
                     statement.execute(
                         "create index if not exists idx_bench_single_entry_account"
                             + " on bench_single_entry (account_id)");
+                    // 원장 id가 SEQUENCE로 바뀌면서 컬럼 DEFAULT가 사라졌다. JDBC 변형은 id를
+                    // 직접 채워야 한다. Hibernate pooled optimizer가 선점한 블록과 겹치지 않도록
+                    // 충분히 높은 값에서 시작하는 전용 시퀀스를 쓴다.
+                    statement.execute("create sequence if not exists bench_jdbc_tx_seq"
+                        + " start with 1000000000 increment by 1");
+                    statement.execute("create sequence if not exists bench_jdbc_entry_seq"
+                        + " start with 1000000000 increment by 1");
                 }
             }));
     }
