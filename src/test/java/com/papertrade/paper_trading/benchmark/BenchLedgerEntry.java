@@ -11,12 +11,11 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
-import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-/** {@code LedgerEntry}를 {@code SEQUENCE}로 바꾼 형태. 벤치마크 전용이다. */
+/** {@code LedgerEntry}의 <b>옛 구조</b>({@code IDENTITY}) 재현. 벤치마크 전용이다. */
 @Entity
 @Table(
     name = "bench_ledger_entries",
@@ -28,9 +27,7 @@ import java.time.LocalDateTime;
 public class BenchLedgerEntry {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "bench_ledger_entry_seq")
-    @SequenceGenerator(name = "bench_ledger_entry_seq", sequenceName = "bench_ledger_entry_seq",
-        allocationSize = 50)
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
