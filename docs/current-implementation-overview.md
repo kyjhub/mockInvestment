@@ -512,6 +512,42 @@ DB transaction 안에서 먼저 Redis 이벤트를 발행하지 않고 `afterCom
 
 매칭 엔진도 동일 주문 row를 같은 종류의 락으로 읽기 때문에 취소와 체결이 직렬화된다.
 
+### 11.5 당일 유효(DAY) 주문의 실효
+
+주문에 유효기간이 없으면 모든 주문이 사실상 GTC가 된다. 그러면 어제 낸 매수 주문의 구속액이 계속 예수금을 깎고(§13.11), 장이 닫혀 호가가 변하지 않는데도 재매칭 스케줄러가 그 종목을 계속 재발행해 Toss API 예산을 쓴다. `DayOrderExpiryScheduler`가 `order.day-expiry.fixed-delay-ms`(기본 60초) 간격으로 이를 정리한다.
+
+**거래일의 끝은 정규장 마감이 아니라 애프터마켓 종료다.** 토스 시장 달력은 한 거래일을 네 세션으로 준다(모두 KST).
+
+| 세션 | 시각(KST) |
+| --- | --- |
+| `dayMarket` | 09:00 ~ 16:50 |
+| `preMarket` | 17:00 ~ 22:30 |
+| `regularMarket` | 22:30 ~ 익일 05:00 |
+| `afterMarket` | 익일 05:00 ~ 07:00 |
+
+정규장이 끝나도 두 시간 더 거래가 가능하므로, 정규장 마감을 기준으로 삼으면 아직 체결될 수 있는 주문을 죽인다.
+
+**마감 시각을 계산하지 않고 받아온다.** `MarketSession.endTime`이 offset을 가진 `OffsetDateTime`이라 서머타임(KST 05:00 EDT / 06:00 EST)과 조기 마감이 공급자 값 그대로 반영된다. 직접 계산하면 전환일마다 틀릴 여지가 생긴다. 달력 응답은 12시간 캐시라 분 단위로 불러도 외부 호출이 늘지 않는다.
+
+`today()`와 `previousBusinessDay()`를 함께 보고 **이미 지난 종료 시각 중 가장 늦은 것**을 기준으로 쓴다. 정규장이 도는 밤 시간에는 오늘 거래일이 진행 중이므로 직전 거래일의 종료가 기준이 된다. 끝난 거래일이 하나도 없으면 아무것도 만료하지 않는다 — 휴장일 판정이 이것으로 함께 해결된다.
+
+만료 대상은 다음과 같다.
+
+```text
+status in (PENDING, PARTIALLY_FILLED)
+  and submitted_at < 직전에 끝난 거래일의 애프터마켓 종료 시각
+```
+
+`submitted_at` 조건이 핵심이다. 마감 이후 접수된 주문은 **다음 거래일 주문**(예약주문)이므로 이번 마감에 만료시키면 안 된다. 이 조건 덕분에 **배치가 멱등해진다.** 반복 실행해도 첫 회에 전부 만료되고 이후에는 대상이 없어, "이미 처리함" 상태를 따로 들고 다닐 필요가 없다.
+
+상태는 `CANCELED`가 아니라 **`EXPIRED`**를 쓴다. 사용자가 직접 취소한 것과 시스템이 실효시킨 것이 주문 조회 화면에서 같아 보이면 문의가 생긴다. 사유는 `orders.close_reason`에 남는다. 이 컬럼은 거절 사유와 공용이라 `reject_reason`에서 이름을 바꿨다.
+
+**주문 하나가 하나의 트랜잭션이다.** 각 주문을 `findByIdForUpdate()`로 잠근 뒤 상태와 `submittedAt`을 다시 확인하고 만료시킨다. 락을 기다리는 사이 체결이 끝났거나 사용자가 취소했을 수 있기 때문이다. 한 건이 매칭과 경합해 실패해도 나머지가 막히지 않고, 멱등하므로 실패분은 다음 주기에 다시 대상이 된다.
+
+**구속액을 푸는 코드는 없다.** 가용잔고를 `orders`에서 파생하므로(§13.11) 상태가 `EXPIRED`로 바뀌는 것만으로 합계에서 빠진다. 부분 체결 주문은 잔량만 실효되고 체결 이력과 체결 수량은 그대로 남는다.
+
+달력 호출이 실패하면(예산 소진, 인증 실패, 타임아웃) 그 주기를 건너뛴다. 마감 시각을 추측해서 실효시키면 되돌릴 방법이 없으므로, 모르는 상태에서는 미루는 쪽을 택한다.
+
 ## 12. 비동기 매칭 요청 처리
 
 ### 12.1 Redis Stream
@@ -882,7 +918,7 @@ realizedProfit += executionAmount - costBasis
 
 **체결 상대가 없어서 체결되지 않은 주문은 거절하지 않는다.** 그건 계좌 문제가 아니라 유동성 문제이므로 `PENDING`으로 대기시킨다. 그래서 loop 안에서 "상대 없음"을 "잔고·보유 부족"보다 먼저 판정한다. 순서가 바뀌면 호가가 잠깐 빈 종목의 정상 주문까지 거절된다.
 
-`Order.reject(reason)`은 체결 이력이 있으면 `REJECTED`가 아니라 `CANCELED`로 보낸다. `REJECTED`는 접수 자체가 무효였다는 뜻이라 부분 체결과 같이 쓸 수 없다. 어느 쪽이든 `rejectReason`과 `filledQuantity`는 보존되고, 사유는 `OrderResponse.rejectReason`으로 노출된다.
+`Order.reject(reason)`은 체결 이력이 있으면 `REJECTED`가 아니라 `CANCELED`로 보낸다. `REJECTED`는 접수 자체가 무효였다는 뜻이라 부분 체결과 같이 쓸 수 없다. 어느 쪽이든 `closeReason`과 `filledQuantity`는 보존되고, 사유는 `OrderResponse.closeReason`으로 노출된다. 이 컬럼은 장 마감 실효 사유와 공용이다(§11.5).
 
 거절 판정이 "체결 상대가 있었는가"에 의존하므로, 외부 호가 snapshot이 비어 있으면 잔고가 부족한 주문도 거절되지 않고 대기한다. 원장이 깨지지는 않지만 거절 시점이 호가 품질에 좌우된다.
 
@@ -1098,6 +1134,10 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `daily-price-range.cache.ttl-seconds` | 5 | 일일 고저가 cache TTL |
 | `daily-price-range.polling.fixed-delay-ms` | 1000 | 일일 고저가 polling 간격 |
 | `daily-price-range.polling.lock-ttl-ms` | 900 | 일일 고저가 polling lock TTL |
+| `order.price-band.margin` | 0.3 | 지정가 주문가격이 당일 거래 범위에서 벗어날 수 있는 비율 (§13.10) |
+| `order.day-expiry.fixed-delay-ms` | 60000 | 당일 유효 주문 실효 확인 간격 (§11.5) |
+| `valuation.total-asset.fixed-delay-ms` | 60000 | `accounts.total_asset_value` 갱신 간격 |
+| `ledger.reconciliation.cron` | `0 30 5 * * *` | 원장 대사 실행 시각 (§13.12) |
 | `matching-engine.polling.fixed-delay-ms` | 100 | 신규 Stream 소비 간격 |
 | `matching-engine.dirty-drain.fixed-delay-ms` | 150 | dirty set drain 간격 |
 | `matching-engine.dirty-drain.batch-size` | 20 | drain cycle당 최대 종목 수 |
@@ -1153,7 +1193,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-21개 test class에 97개 test가 있다.
+22개 test class에 105개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1173,6 +1213,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
 | `ValuationServiceTests` | 6 | 단위 | 총자산·평가손익 계산, 예수금 제외 수익률, 시세 미확보·다중 통화 시 생략 |
 | `TotalAssetValuationIntegrationTest` | 5 | 통합 | total_asset_value 갱신, 예수금 미훼손, 종목당 1회 조회, 잔고 화면, 시세 장애 시 부분 응답 |
+| `DayOrderExpiryIntegrationTest` | 8 | 통합 | 마감 전 접수분 실효, 마감 후 접수분(예약주문) 생존, 애프터마켓 진행 중 생존, 이전 거래일 주문 실효, 반복 실행 멱등, 구속액 해제, 부분 체결 이력 보존, 끝난 거래일 없음 |
 | `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
@@ -1191,7 +1232,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-12 기준 `./gradlew test --rerun-tasks`는 **97건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-13 기준 `./gradlew test --rerun-tasks`는 **105건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1213,7 +1254,6 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - DLQ 검색, replay, 삭제 관리 API
 - dirty-set metric의 외부 scrape endpoint 노출과 dashboard/alert 구성
 - 수수료와 세금의 실제 현금 반영 정책. 원장 모델(FEE/TAX 분개)과 차감 경로는 있으나 계산기가 0을 반환한다. 0이 아닌 값으로 바꾸려면 체결 시점 잔고 캡이 수수료를 고려하도록 함께 고쳐야 한다
-- 자기 계좌 간 자전거래 차단과 주문가격 제한폭 검증
 - DB migration 또는 schema provisioning 도구
 
 ## 19. 현재 구조에서 주의할 점
@@ -1330,4 +1370,4 @@ Redis 슬롯 lock은 계정의 동시 WebSocket 연결 수를 2개로 제한하�
 
 `application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `SPRING_JPA_DDL_AUTO=update`와 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
 
-다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.reject_reason`(§13.8), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
+다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.close_reason`(§13.9), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. `close_reason`은 `reject_reason`을 이름만 바꾼 것이고(§11.5), `order_status` 값에 `EXPIRED`가 추가되었다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.

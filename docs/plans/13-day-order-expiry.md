@@ -12,28 +12,44 @@
 
 **장외에 헛돈다.** `PendingOrderRematchScheduler`가 30초마다 미체결 종목을 재발행하고, 그 종목들이 호가 폴링 대상이 된다. 장이 닫혀 호가가 변하지 않는데도 Toss API 예산을 계속 쓴다.
 
-## 1. 마감 시각은 계산하지 않고 받아온다
+## 1. 거래일의 끝은 정규장 마감이 아니라 **애프터마켓 종료**다
 
-서머타임 때문에 미국 정규장 마감은 KST 05:00(EDT) 또는 06:00(EST)으로 갈린다. 직접 계산하면 전환일마다 틀릴 여지가 생긴다.
+토스 시장 달력 응답을 실제로 받아보니 한 거래일이 네 세션으로 되어 있다. 모두 KST다.
 
-**`MarketCalendarService`가 이미 실제 마감 시각을 준다.**
+| 세션 | 시각(KST) |
+| --- | --- |
+| `dayMarket` (주간거래) | 09:00 ~ 16:50 |
+| `preMarket` | 17:00 ~ 22:30 |
+| `regularMarket` | 22:30 ~ 익일 05:00 |
+| `afterMarket` | 익일 05:00 ~ 07:00 |
+
+정규장이 끝나도 **두 시간 더 거래가 가능하다.** 정규장 마감을 기준으로 실효시키면 아직 체결될 수 있는 주문을 죽인다. 기준 시각은 `afterMarket().endTime()`이다.
 
 ```java
-MarketCalendarResult calendar = marketCalendarService.getUsMarketCalendar(date).result();
-OffsetDateTime regularClose = calendar.today().regularMarket().endTime();
+MarketCalendarResult calendar = marketCalendarService.getUsMarketCalendar(null).result();
+OffsetDateTime tradingDayEnd = calendar.today().afterMarket().endTime();
 ```
 
-`MarketSession.endTime`이 `OffsetDateTime`이라 offset이 함께 온다. 서머타임뿐 아니라 **조기 마감**(추수감사절 다음 날 등 13:00 ET 마감)까지 공급자 값 그대로 반영된다. 우리가 `ZoneId.of("America/New_York")`와 16:00을 하드코딩하면 조기 마감을 놓친다.
+**마감 시각은 계산하지 않는다.** `MarketSession.endTime`이 offset을 가진 `OffsetDateTime`이라 서머타임(KST 05:00 EDT / 06:00 EST)과 **조기 마감**이 공급자 값 그대로 온다. `ZoneId.of("America/New_York")`와 16:00을 하드코딩하면 전환일과 조기 마감을 모두 놓친다.
 
-응답은 12시간 캐시(`market-calendar.cache.ttl-hours`)라 자주 불러도 외부 호출이 늘지 않는다.
+응답은 12시간 캐시(`market-calendar.cache.ttl-hours`)라 분 단위로 불러도 외부 호출이 늘지 않는다.
 
-**영업일 판정도 같은 응답으로 한다.** `today().regularMarket()`이 없으면 그날은 정규장이 없는 날이므로 아무것도 취소하지 않는다. 휴장일에 접수된 주문은 다음 영업일 장에서 유효해야 한다 — 예약주문과 같은 취급이다.
+**`today()`와 `previousBusinessDay()`를 함께 본다.** 호출 시점에 따라 `today()`의 종료가 아직 미래다 — 정규장이 도는 밤 시간에는 오늘 거래일이 진행 중이므로 직전 거래일의 종료가 기준이 된다. 이미 지난 종료 시각 중 가장 늦은 것을 고른다.
+
+```java
+Stream.of(calendar.today(), calendar.previousBusinessDay())
+    .map(MarketBusinessDay::afterMarket).map(MarketSession::endTime)
+    .filter(endTime -> !endTime.isAfter(now))
+    .max(OffsetDateTime::compareTo)
+```
+
+**영업일 판정도 이 스트림이 그대로 한다.** 끝난 거래일이 하나도 없으면 기준 시각이 없으니 아무것도 만료하지 않는다. 휴장일에 접수된 주문은 다음 영업일까지 살아남는다 — 예약주문과 같은 취급이다.
 
 ## 2. 취소 대상 — 마감 시각 **이전에 접수된** 미체결 주문
 
 ```text
 status in (PENDING, PARTIALLY_FILLED)
-  and submitted_at < 그 세션의 정규장 마감 시각
+  and submitted_at < 직전에 끝난 거래일의 애프터마켓 종료 시각
 ```
 
 `submitted_at` 조건이 핵심이다. 마감 이후에 접수된 주문은 **다음 세션 주문**(예약주문)이므로 이번 마감에 취소하면 안 된다. 그 주문은 다음 세션 마감까지 유효하고, 그때도 미체결이면 그때 만료된다.
@@ -79,7 +95,7 @@ cron 고정 시각(예: KST 07:00)은 단순하지만, 서머타임 때문에 **
     fixedDelayString = "${order.day-expiry.fixed-delay-ms:60000}"
 )
 public void expireDayOrders() {
-    // 오늘 정규장 마감이 지났는가 → 지났으면 그 시각 이전 접수분을 만료
+    // 이미 끝난 거래일이 있는가 → 있으면 그 종료 시각 이전 접수분을 만료
 }
 ```
 
@@ -150,7 +166,7 @@ order:
 
 **마감 시각**
 
-- 정규장 마감 전에는 아무것도 만료되지 않는지.
+- 거래일 종료 전에는 아무것도 만료되지 않는지. 정규장이 끝났어도 애프터마켓이 돌고 있으면 살아 있어야 한다.
 - 마감 직후 1분 안에 그 세션 주문이 만료되는지.
 - **조기 마감일**(13:00 ET)에 그 시각 기준으로 만료되는지 — 16:00 하드코딩이었다면 3시간 늦는다.
 - 서머타임 전환일 전후로 마감 시각이 따라 바뀌는지.
@@ -167,7 +183,7 @@ order:
 
 **휴장일**
 
-- 정규장이 없는 날에는 아무것도 만료되지 않는지. 주말·공휴일에 접수된 주문이 다음 영업일까지 살아야 한다.
+- 끝난 거래일이 없으면 아무것도 만료되지 않는지. 주말·공휴일에 접수된 주문이 다음 영업일까지 살아야 한다.
 
 **가용잔고**
 
@@ -199,7 +215,6 @@ order:
 
 ## 확인이 필요한 가정
 
-- **`MarketCalendarService`가 휴장일에 무엇을 돌려주는지 확인해야 한다.** `today().regularMarket()`이 `null`인지, `today()` 자체가 없는지, 아니면 예외인지에 따라 영업일 판정 코드가 달라진다. 실제 응답으로 확인이 필요하다.
-- **조기 마감이 `regularMarket().endTime()`에 반영된다고 가정했다.** 공급자가 정규 마감 시각을 고정으로 주고 조기 마감을 별도 필드로 표현한다면 이 계획의 전제가 깨진다.
-- **서버 타임존이 바뀌지 않는다고 가정했다.** `submitted_at`이 `LocalDateTime`이라 타임존이 바뀌면 기존 값의 의미가 달라지고 cutoff 비교가 어긋난다.
-- **마감 후 1분 이내 만료로 충분하다고 보았다.** 그 사이 장외 호가로 체결될 가능성은 남는다. 정확히 마감 시각에 끊으려면 매칭 엔진이 장 운영 시간을 알아야 한다.
+- ~~**`MarketCalendarService`가 휴장일에 무엇을 돌려주는지 확인해야 한다.**~~ 실제 응답으로 확인했다. 거래일이 아닌 날은 해당 `MarketBusinessDay`가 비므로, `null`을 걸러내는 것으로 영업일 판정이 된다.
+- ~~**조기 마감이 `regularMarket().endTime()`에 반영된다고 가정했다.**~~ 세션별 시작·종료 시각이 응답에 그대로 실려 온다. 다만 기준 세션은 `regularMarket`이 아니라 `afterMarket`이다 — 위 §1 참조.
+- **`submittedAt`이 타임존 없는 `LocalDateTime`이다.** 응답의 `OffsetDateTime`을 `atZoneSameInstant(ZoneId.systemDefault()).toLocalDateTime()`으로 서버 타임존에 맞춰야 비교가 성립한다. `toLocalDateTime()`을 바로 부르면 응답 offset 기준 벽시계 시각이 나와 어긋난다. 주문 시각을 `OffsetDateTime`으로 바꾸는 게 근본 해결이지만 스키마 변경 범위가 커서 이번에는 하지 않았다.
