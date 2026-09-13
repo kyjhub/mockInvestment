@@ -43,7 +43,16 @@ Stream.of(calendar.today(), calendar.previousBusinessDay())
     .max(OffsetDateTime::compareTo)
 ```
 
-**영업일 판정도 이 스트림이 그대로 한다.** 끝난 거래일이 하나도 없으면 기준 시각이 없으니 아무것도 만료하지 않는다. 휴장일에 접수된 주문은 다음 영업일까지 살아남는다 — 예약주문과 같은 취급이다.
+**영업일 판정도 이 스트림이 그대로 한다.** 휴장일 응답은 `today` 자체가 비는 게 아니라 `today`는 있고 네 세션이 전부 `null`로 온다.
+
+```json
+"today": { "date": "2026-07-03", "dayMarket": null, "preMarket": null,
+           "regularMarket": null, "afterMarket": null }
+```
+
+세션의 `null`을 걸러내면 그날이 후보에서 빠지고 자연히 직전 영업일의 종료가 기준이 된다. 별도의 영업일 판정 분기가 필요 없다. 반대로 세션을 `null` 검사 없이 참조하면 휴장일마다 `NullPointerException`이 난다.
+
+끝난 거래일이 하나도 없으면 기준 시각이 없으니 아무것도 만료하지 않는다. 휴장일에 접수된 주문은 다음 영업일까지 살아남는다 — 예약주문과 같은 취급이다.
 
 ## 2. 취소 대상 — 마감 시각 **이전에 접수된** 미체결 주문
 
@@ -215,6 +224,6 @@ order:
 
 ## 확인이 필요한 가정
 
-- ~~**`MarketCalendarService`가 휴장일에 무엇을 돌려주는지 확인해야 한다.**~~ 실제 응답으로 확인했다. 거래일이 아닌 날은 해당 `MarketBusinessDay`가 비므로, `null`을 걸러내는 것으로 영업일 판정이 된다.
+- ~~**`MarketCalendarService`가 휴장일에 무엇을 돌려주는지 확인해야 한다.**~~ 실제 응답으로 확인했다. `MarketBusinessDay` 자체는 `date`와 함께 오고 네 세션만 `null`이다. 세션의 `null`을 걸러내는 것으로 영업일 판정이 된다.
 - ~~**조기 마감이 `regularMarket().endTime()`에 반영된다고 가정했다.**~~ 세션별 시작·종료 시각이 응답에 그대로 실려 온다. 다만 기준 세션은 `regularMarket`이 아니라 `afterMarket`이다 — 위 §1 참조.
 - **`submittedAt`이 타임존 없는 `LocalDateTime`이다.** 응답의 `OffsetDateTime`을 `atZoneSameInstant(ZoneId.systemDefault()).toLocalDateTime()`으로 서버 타임존에 맞춰야 비교가 성립한다. `toLocalDateTime()`을 바로 부르면 응답 offset 기준 벽시계 시각이 나와 어긋난다. 주문 시각을 `OffsetDateTime`으로 바꾸는 게 근본 해결이지만 스키마 변경 범위가 커서 이번에는 하지 않았다.
