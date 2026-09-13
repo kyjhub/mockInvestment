@@ -101,7 +101,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
     @Autowired private DataSource dataSource;
     @PersistenceContext private EntityManager entityManager;
 
-    private enum Variant { SINGLE, DOUBLE_JPA, DOUBLE_JDBC, DOUBLE_BATCH }
+    private enum Variant { SINGLE, DOUBLE_JPA, DOUBLE_JPA_SEQ, DOUBLE_JDBC, DOUBLE_BATCH }
 
     protected void printComparisonTable() throws Exception {
         createSingleEntryTable();
@@ -139,6 +139,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
         long single = sequential.get(Variant.SINGLE).p50Us();
         long jpa = sequential.get(Variant.DOUBLE_JPA).p50Us();
         long batch = sequential.get(Variant.DOUBLE_BATCH).p50Us();
+        long jpaSeq = sequential.get(Variant.DOUBLE_JPA_SEQ).p50Us();
 
         System.out.printf("%n== 체결 1건 전체(내부 체결, 외부 호출 없음) 중앙값 = %d us ==%n", fillUs);
         System.out.println("변형\t\t쓰기(us)\t체결 1건 중 비중");
@@ -150,8 +151,12 @@ abstract class LedgerWriteCostBenchmarkSupport {
             batch - single, (batch - single) * 100.0 / fillUs);
         System.out.printf("현재 구조의 추가 비용 (DOUBLE_BATCH→DOUBLE_JPA) = %+d us  체결의 %.1f%%%n",
             jpa - batch, (jpa - batch) * 100.0 / fillUs);
-        System.out.printf("배치 전환 시 체결 1건 = %d us → %d us  (처리량 %.2fx)%n",
+        System.out.printf("%n[선택지] JPA+SEQUENCE+배치 : 체결 %d us → %d us  (처리량 %.2fx)%n",
+            fillUs, fillUs - (jpa - jpaSeq), fillUs / (double) (fillUs - (jpa - jpaSeq)));
+        System.out.printf("[선택지] JDBC 배치         : 체결 %d us → %d us  (처리량 %.2fx)%n",
             fillUs, fillUs - (jpa - batch), fillUs / (double) (fillUs - (jpa - batch)));
+        System.out.printf("두 선택지의 차이 = %d us (체결의 %.1f%%)%n",
+            jpaSeq - batch, (jpaSeq - batch) * 100.0 / fillUs);
         System.out.println();
     }
 
@@ -257,6 +262,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
         switch (variant) {
             case SINGLE -> writeSingleEntry(fixture);
             case DOUBLE_JPA -> writeDoubleViaJpa(fixture, key);
+            case DOUBLE_JPA_SEQ -> writeDoubleViaJpaWithSequence(fixture, key);
             case DOUBLE_JDBC -> writeDoubleViaJdbc(fixture, key, false);
             case DOUBLE_BATCH -> writeDoubleViaJdbc(fixture, key, true);
         }
@@ -304,6 +310,33 @@ abstract class LedgerWriteCostBenchmarkSupport {
                 new Posting(account, LedgerAccount.REALIZED_PNL, null, BigDecimal.ZERO, null, null)
             )
         );
+    }
+
+    /**
+     * JPA를 그대로 두고 ID 전략만 {@code SEQUENCE}로 바꾼 경우. 배치가 켜진다.
+     *
+     * <p>{@code IDENTITY}에서는 Hibernate가 생성 키를 INSERT 직후 받아야 해서 배치를 못 한다.
+     * {@code SEQUENCE}면 id를 미리 알 수 있어 INSERT를 모았다가 flush 시점에 묶어 보낸다.
+     * pooled optimizer(allocationSize=50)라 시퀀스 왕복도 50건에 한 번이다.
+     *
+     * <p>이 변형이 답하는 질문: <b>JdbcTemplate까지 가지 않고 ID 전략만 바꿔도 되는가.</b>
+     * 왕복은 줄지만 영속성 컨텍스트 오버헤드는 남으므로 DOUBLE_BATCH까지는 못 간다.
+     */
+    private void writeDoubleViaJpaWithSequence(Fixture fixture, String key) {
+        Account account = entityManager.getReference(Account.class, fixture.accountId());
+        Stock stock = entityManager.getReference(Stock.class, fixture.stockId());
+        BenchLedgerTransaction transaction = new BenchLedgerTransaction("TRADE", key, "benchmark");
+        entityManager.persist(transaction);
+        entityManager.persist(new BenchLedgerEntry(
+            transaction, account, "CASH", null, AMOUNT.negate(), null, AMOUNT));
+        entityManager.persist(new BenchLedgerEntry(
+            transaction, account, "SECURITIES", stock, AMOUNT, 10L, AMOUNT));
+        entityManager.persist(new BenchLedgerEntry(
+            transaction, account, "CASH", null, AMOUNT, null, AMOUNT));
+        entityManager.persist(new BenchLedgerEntry(
+            transaction, account, "SECURITIES", stock, AMOUNT.negate(), -10L, AMOUNT));
+        entityManager.persist(new BenchLedgerEntry(
+            transaction, account, "REALIZED_PNL", null, BigDecimal.ZERO, null, null));
     }
 
     /** 같은 6행을 JDBC로. {@code batched}면 분개 5행을 한 번의 왕복으로 보낸다. */

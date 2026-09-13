@@ -8,6 +8,13 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
+    properties:
+      hibernate:
+        jdbc:
+          # SEQUENCE 변형이 실제로 배치되는지 보려면 켜야 한다.
+          # IDENTITY인 운영 엔티티는 이 값과 무관하게 배치되지 않으므로 대조군은 영향받지 않는다.
+          batch_size: 50
+        order_inserts: true
   data:
     redis:
       host: localhost
