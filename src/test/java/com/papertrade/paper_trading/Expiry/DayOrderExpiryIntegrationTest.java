@@ -173,10 +173,40 @@ class DayOrderExpiryIntegrationTest extends IntegrationTestContainers {
     }
 
     @Test
-    void nothingExpiresWhenTheCalendarHasNoClosedTradingDay() {
-        // 휴장이 이어져 아직 끝난 거래일이 없는 경우. 아무것도 건드리지 않아야 한다.
+    void onAHolidayTheCutoffFallsBackToThePreviousBusinessDay() {
+        // 휴장일 응답은 today가 null이 아니라, today는 있고 네 세션이 전부 null이다.
+        // 직전 영업일의 애프터마켓 종료(2026-07-03T07:00+09:00)가 기준이 되어야 한다.
+        givenHolidayCalendar();
+        Order duringPreviousSession = persistOrderSubmittedAt(offset("2026-07-02T23:00:00+09:00"));
+        Order afterPreviousSession = persistOrderSubmittedAt(offset("2026-07-03T08:00:00+09:00"));
+
+        expiryScheduler.expireDayOrders();
+
+        assertThat(orderRepository.findById(duringPreviousSession.getId()).orElseThrow().getStatus())
+            .isEqualTo(OrderStatus.EXPIRED);
+        // 휴장일에 접수된 주문은 다음 영업일 주문이다. 장이 안 열렸다고 죽이면 안 된다.
+        assertThat(orderRepository.findById(afterPreviousSession.getId()).orElseThrow().getStatus())
+            .isEqualTo(OrderStatus.PENDING);
+    }
+
+    @Test
+    void nothingExpiresWhenNoTradingDayHasEndedYet() {
+        // 방어적 경로. 연휴가 길어 직전 영업일조차 응답에 없으면 기준 시각이 없다.
         when(marketCalendarService.getUsMarketCalendar(any())).thenReturn(
             new MarketCalendarResponse(new MarketCalendarResult(null, null, null)));
+        Order order = persistOrderSubmittedAt(OffsetDateTime.now().minusDays(3));
+
+        expiryScheduler.expireDayOrders();
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+            .isEqualTo(OrderStatus.PENDING);
+    }
+
+    @Test
+    void nothingExpiresWhenTheCalendarCallFails() {
+        // 마감 시각을 모르는 채로 실효시키면 되돌릴 방법이 없다. 다음 주기로 미룬다.
+        when(marketCalendarService.getUsMarketCalendar(any()))
+            .thenThrow(new IllegalStateException("calendar unavailable"));
         Order order = persistOrderSubmittedAt(OffsetDateTime.now().minusDays(3));
 
         expiryScheduler.expireDayOrders();
@@ -209,6 +239,30 @@ class DayOrderExpiryIntegrationTest extends IntegrationTestContainers {
             new MarketSession(afterMarketEnd.minusHours(14), afterMarketEnd.minusHours(8)),
             new MarketSession(afterMarketEnd.minusHours(8), afterMarketEnd.minusHours(2)),
             new MarketSession(afterMarketEnd.minusHours(2), afterMarketEnd));
+    }
+
+    /** 실제 휴장일 응답(2026-07-03, 독립기념일 연휴)의 모양 그대로. today는 있고 세션만 비어 있다. */
+    private void givenHolidayCalendar() {
+        MarketBusinessDay holiday = new MarketBusinessDay(
+            LocalDate.parse("2026-07-03"), null, null, null, null);
+        MarketBusinessDay previous = new MarketBusinessDay(
+            LocalDate.parse("2026-07-02"),
+            new MarketSession(offset("2026-07-02T09:00:00+09:00"), offset("2026-07-02T16:50:00+09:00")),
+            new MarketSession(offset("2026-07-02T17:00:00+09:00"), offset("2026-07-02T22:30:00+09:00")),
+            new MarketSession(offset("2026-07-02T22:30:00+09:00"), offset("2026-07-03T05:00:00+09:00")),
+            new MarketSession(offset("2026-07-03T05:00:00+09:00"), offset("2026-07-03T07:00:00+09:00")));
+        MarketBusinessDay next = new MarketBusinessDay(
+            LocalDate.parse("2026-07-06"),
+            new MarketSession(offset("2026-07-06T09:00:00+09:00"), offset("2026-07-06T16:50:00+09:00")),
+            new MarketSession(offset("2026-07-06T17:00:00+09:00"), offset("2026-07-06T22:30:00+09:00")),
+            new MarketSession(offset("2026-07-06T22:30:00+09:00"), offset("2026-07-07T05:00:00+09:00")),
+            new MarketSession(offset("2026-07-07T05:00:00+09:00"), offset("2026-07-07T07:00:00+09:00")));
+        when(marketCalendarService.getUsMarketCalendar(any())).thenReturn(
+            new MarketCalendarResponse(new MarketCalendarResult(holiday, previous, next)));
+    }
+
+    private OffsetDateTime offset(String text) {
+        return OffsetDateTime.parse(text);
     }
 
     private Order persistOrderSubmittedAt(OffsetDateTime submittedAt) {

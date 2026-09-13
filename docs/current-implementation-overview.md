@@ -529,7 +529,21 @@ DB transaction 안에서 먼저 Redis 이벤트를 발행하지 않고 `afterCom
 
 **마감 시각을 계산하지 않고 받아온다.** `MarketSession.endTime`이 offset을 가진 `OffsetDateTime`이라 서머타임(KST 05:00 EDT / 06:00 EST)과 조기 마감이 공급자 값 그대로 반영된다. 직접 계산하면 전환일마다 틀릴 여지가 생긴다. 달력 응답은 12시간 캐시라 분 단위로 불러도 외부 호출이 늘지 않는다.
 
-`today()`와 `previousBusinessDay()`를 함께 보고 **이미 지난 종료 시각 중 가장 늦은 것**을 기준으로 쓴다. 정규장이 도는 밤 시간에는 오늘 거래일이 진행 중이므로 직전 거래일의 종료가 기준이 된다. 끝난 거래일이 하나도 없으면 아무것도 만료하지 않는다 — 휴장일 판정이 이것으로 함께 해결된다.
+`today()`와 `previousBusinessDay()`를 함께 보고 **이미 지난 종료 시각 중 가장 늦은 것**을 기준으로 쓴다. 정규장이 도는 밤 시간에는 오늘 거래일이 진행 중이므로 직전 거래일의 종료가 기준이 된다.
+
+**휴장일 판정도 같은 코드가 한다.** 휴장일 응답은 `today` 자체가 비는 게 아니라 `today`는 있고 네 세션이 전부 `null`이다. 세션의 `null`을 걸러내면 그날은 후보에서 빠지고 자연히 직전 영업일의 종료가 기준이 된다. 별도의 영업일 판정 분기가 필요 없고, 세션을 `null` 검사 없이 참조하면 휴장일마다 `NullPointerException`이 난다.
+
+```java
+Stream.of(calendar.today(), calendar.previousBusinessDay())
+    .filter(Objects::nonNull)
+    .map(MarketBusinessDay::afterMarket)
+    .filter(Objects::nonNull)          // 휴장일은 여기서 빠진다
+    .map(MarketSession::endTime)
+    .filter(endTime -> !endTime.isAfter(now))
+    .max(OffsetDateTime::compareTo)
+```
+
+끝난 거래일이 하나도 없으면 아무것도 만료하지 않는다. 휴장일에 접수된 주문은 직전 영업일 종료 이후 접수분이므로 다음 영업일까지 살아남는다 — 예약주문과 같은 취급이다.
 
 만료 대상은 다음과 같다.
 
@@ -1193,7 +1207,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-22개 test class에 105개 test가 있다.
+22개 test class에 107개 test가 있다.
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1213,7 +1227,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
 | `ValuationServiceTests` | 6 | 단위 | 총자산·평가손익 계산, 예수금 제외 수익률, 시세 미확보·다중 통화 시 생략 |
 | `TotalAssetValuationIntegrationTest` | 5 | 통합 | total_asset_value 갱신, 예수금 미훼손, 종목당 1회 조회, 잔고 화면, 시세 장애 시 부분 응답 |
-| `DayOrderExpiryIntegrationTest` | 8 | 통합 | 마감 전 접수분 실효, 마감 후 접수분(예약주문) 생존, 애프터마켓 진행 중 생존, 이전 거래일 주문 실효, 반복 실행 멱등, 구속액 해제, 부분 체결 이력 보존, 끝난 거래일 없음 |
+| `DayOrderExpiryIntegrationTest` | 10 | 통합 | 마감 전 접수분 실효, 마감 후 접수분(예약주문) 생존, 애프터마켓 진행 중 생존, 이전 거래일 주문 실효, 휴장일의 직전 영업일 폴백, 반복 실행 멱등, 구속액 해제, 부분 체결 이력 보존, 끝난 거래일 없음, 달력 호출 실패 |
 | `LedgerIntegrityIntegrationTest` | 7 | 통합 | 개시 분개, 잔고의 원장 재구성, 거래 단위 균형, 전역 균형, 멱등키, 체결·원장 연결 |
 | `OrderRejectionTests` | 3 | 단위 | `REJECTED`/`CANCELED` 전이와 사유·체결 수량 보존 |
 | `SymbolSubscriptionRegistryTests` | 3 | 단위 | 다중 구독, subscription 이동, disconnect 정리 |
@@ -1232,7 +1246,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-13 기준 `./gradlew test --rerun-tasks`는 **105건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-09-13 기준 `./gradlew test --rerun-tasks`는 **107건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
