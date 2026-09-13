@@ -24,7 +24,7 @@ class OrderRejectionTests {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.REJECTED);
         assertThat(order.getRejectedAt()).isNotNull();
         assertThat(order.getCanceledAt()).isNull();
-        assertThat(order.getRejectReason()).isEqualTo("주문 가능 금액이 부족합니다.");
+        assertThat(order.getCloseReason()).isEqualTo("주문 가능 금액이 부족합니다.");
     }
 
     @Test
@@ -37,7 +37,7 @@ class OrderRejectionTests {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELED);
         assertThat(order.getCanceledAt()).isNotNull();
         assertThat(order.getRejectedAt()).isNull();
-        assertThat(order.getRejectReason()).isEqualTo("보유 수량이 부족합니다.");
+        assertThat(order.getCloseReason()).isEqualTo("보유 수량이 부족합니다.");
         assertThat(order.getFilledQuantity()).isEqualTo(3L);
     }
 

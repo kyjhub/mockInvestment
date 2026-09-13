@@ -266,7 +266,7 @@ public class OrderTradingService {
             order.getFilledQuantity(),
             order.getRemainingQuantity(),
             order.getStatus(),
-            order.getRejectReason(),
+            order.getCloseReason(),
             order.getSubmittedAt(),
             order.getUpdatedAt(),
             executions

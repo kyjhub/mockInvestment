@@ -114,7 +114,7 @@ class OrderFillLedgerIntegrityTests {
         assertThat(buyer.getCashBalance()).isEqualByComparingTo("40.00");
         // 체결 이력이 있으므로 REJECTED가 아니라 잔량 취소로 종료한다.
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.CANCELED);
-        assertThat(buyOrder.getRejectReason()).isEqualTo("주문 가능 금액이 부족합니다.");
+        assertThat(buyOrder.getCloseReason()).isEqualTo("주문 가능 금액이 부족합니다.");
     }
 
     @Test
@@ -164,7 +164,7 @@ class OrderFillLedgerIntegrityTests {
         service.matchOrder(100L, orderBook(ask("60.0000", 1L)), dailyPriceRange());
 
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.REJECTED);
-        assertThat(buyOrder.getRejectReason()).isEqualTo("주문 가능 금액이 부족합니다.");
+        assertThat(buyOrder.getCloseReason()).isEqualTo("주문 가능 금액이 부족합니다.");
         assertThat(buyOrder.getFilledQuantity()).isZero();
     }
 
@@ -177,7 +177,7 @@ class OrderFillLedgerIntegrityTests {
         service.matchOrder(100L, orderBook(), dailyPriceRange());
 
         assertThat(sellOrder.getStatus()).isEqualTo(OrderStatus.REJECTED);
-        assertThat(sellOrder.getRejectReason()).isEqualTo("보유 수량이 부족합니다.");
+        assertThat(sellOrder.getCloseReason()).isEqualTo("보유 수량이 부족합니다.");
     }
 
     @Test
@@ -191,7 +191,7 @@ class OrderFillLedgerIntegrityTests {
         service.matchOrder(100L, orderBook(), dailyPriceRange());
 
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.PENDING);
-        assertThat(buyOrder.getRejectReason()).isNull();
+        assertThat(buyOrder.getCloseReason()).isNull();
     }
 
     /** save()가 인자를 그대로 돌려주는 repository mock. */

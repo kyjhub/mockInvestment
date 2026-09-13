@@ -149,6 +149,26 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         @Param("statuses") Collection<OrderStatus> statuses
     );
 
+    /**
+     * 거래일 종료로 실효시킬 주문. <b>종료 시각 이전에 접수된</b> 미체결 주문만이다.
+     *
+     * <p>접수 시각 조건이 핵심이다. 종료 이후 접수된 주문은 다음 거래일 주문(예약주문)이므로
+     * 이번 만료 대상이 아니다. 이 조건 덕분에 batch가 멱등해져 주기적으로 돌려도 안전하다.
+     *
+     * <p>id 순으로 돌려준다. 주문 row를 하나씩 잠그며 처리하므로 획득 순서가 고정돼야 한다.
+     */
+    @Query("""
+        select o.id
+        from Order o
+        where o.status in :statuses
+          and o.submittedAt < :closedAt
+        order by o.id asc
+        """)
+    List<Long> findExpirableOrderIds(
+        @Param("statuses") Collection<OrderStatus> statuses,
+        @Param("closedAt") LocalDateTime closedAt
+    );
+
     record MatchableOrder(Long id, LocalDateTime submittedAt) {
     }
 
