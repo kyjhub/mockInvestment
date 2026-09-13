@@ -82,6 +82,9 @@ order:
     # 지정가 주문가격이 당일 거래 범위에서 벗어날 수 있는 비율.
     # 미국 시장에는 일일 가격제한폭이 없으므로 규제 한도가 아니라 오입력 방지 장치다.
     margin: ${ORDER_PRICE_BAND_MARGIN:0.3}
+  day-expiry:
+    # 거래일 종료 직후 실효시키기 위해 분 단위로 확인한다. 대상이 없으면 no-op이다.
+    fixed-delay-ms: ${ORDER_DAY_EXPIRY_DELAY_MS:60000}
 
 valuation:
   total-asset:

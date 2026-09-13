@@ -18,7 +18,7 @@ public record OrderResponse(
     Long filledQuantity,
     Long remainingQuantity,
     OrderStatus status,
-    String rejectReason,
+    String closeReason,
     LocalDateTime submittedAt,
     LocalDateTime updatedAt,
     List<OrderExecutionResponse> executions

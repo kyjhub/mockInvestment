@@ -109,8 +109,14 @@ public class Order {
     @Column(name = "rejected_at")
     private LocalDateTime rejectedAt;
 
-    @Column(name = "reject_reason", length = 255)
-    private String rejectReason;
+    /**
+     * 주문이 종료된 사유. 거절·잔량 취소·만료가 공유한다.
+     *
+     * <p>거절 전용이 아니라 "종료 사유"인 이유는, 체결 이력이 있는 주문의 거절이 잔량 취소로,
+     * 거래일 종료 미체결이 만료로 끝나기 때문이다. 셋 다 사용자에게 이유를 알려야 한다.
+     */
+    @Column(name = "close_reason", length = 255)
+    private String closeReason;
 
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
@@ -170,11 +176,26 @@ public class Order {
      * <p>체결 이력이 있으면 {@code REJECTED}가 아니라 잔량 취소({@code CANCELED})로 종료한다.
      * {@code REJECTED}는 접수 자체가 무효였다는 뜻이라 부분 체결과 같이 쓸 수 없다.
      */
+    /**
+     * 당일 유효 주문을 거래일 종료로 실효시킨다.
+     *
+     * <p>체결 이력이 있어도 {@code EXPIRED}다. 거절과 달리 만료는 "접수가 무효였다"는 뜻이 아니라
+     * "유효기간이 끝났다"는 뜻이라, 부분 체결과 모순되지 않는다.
+     */
+    public void expire(String reason) {
+        if (!CANCELABLE_STATUSES.contains(this.status)) {
+            throw new IllegalArgumentException("이미 종료된 주문은 만료시킬 수 없습니다.");
+        }
+        this.status = OrderStatus.EXPIRED;
+        this.canceledAt = LocalDateTime.now();
+        this.closeReason = reason;
+    }
+
     public void reject(String reason) {
         if (!CANCELABLE_STATUSES.contains(this.status)) {
             throw new IllegalArgumentException("이미 종료된 주문은 거절할 수 없습니다.");
         }
-        this.rejectReason = reason;
+        this.closeReason = reason;
         if (this.filledQuantity > 0) {
             this.status = OrderStatus.CANCELED;
             this.canceledAt = LocalDateTime.now();
