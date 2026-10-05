@@ -3,7 +3,6 @@ HELP.md
 
 ### AI docs ###
 AGENTS.md
-docs/entity-spec.md
 
 .gradle
 build/
