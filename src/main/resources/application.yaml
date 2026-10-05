@@ -86,6 +86,10 @@ orderbook:
     refresh-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_REFRESH_MS:5000}
     ttl-ms: ${ORDERBOOK_ACTIVE_SYMBOLS_TTL_MS:30000}
 
+scheduling:
+  # false면 @Scheduled 작업이 하나도 돌지 않는다. 벤치마크 프로파일이 끈다.
+  enabled: ${SCHEDULING_ENABLED:true}
+
 order:
   price-band:
     # 지정가 주문가격이 현재가에서 벗어날 수 있는 비율.

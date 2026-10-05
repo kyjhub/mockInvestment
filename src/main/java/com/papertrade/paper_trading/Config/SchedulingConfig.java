@@ -1,9 +1,11 @@
 package com.papertrade.paper_trading.Config;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 /**
@@ -89,6 +91,22 @@ public class SchedulingConfig {
     @Bean(VALUATION_SCHEDULER)
     public TaskScheduler valuationScheduler() {
         return threadPoolTaskScheduler(valuationPoolSize, "valuation-");
+    }
+
+    /**
+     * {@code @Scheduled} 작업을 켠다. {@code scheduling.enabled=false}면 하나도 돌지 않는다.
+     *
+     * <p>끌 수 있어야 하는 이유는 벤치마크다. 주기를 늘려 중화하는 방식으로는 막을 수 없는 것이 있다 —
+     * {@code fixedDelay}는 {@code initialDelay}가 없으면 <b>기동 직후 한 번 실행된다</b>. 재사용되는 벤치마크
+     * DB에서 그 첫 실행이 쌓인 주문을 실효시키거나 계좌를 일괄 평가하면 측정과 겹친다. 그리고 스케줄러를
+     * 추가할 때마다 프로파일에 중화 설정을 빠짐없이 넣어야 하는 규칙도 필요 없어진다.
+     *
+     * <p>스케줄러 풀 빈은 그대로 만든다. 작업만 등록되지 않는다.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @EnableScheduling
+    @ConditionalOnProperty(name = "scheduling.enabled", havingValue = "true", matchIfMissing = true)
+    static class SchedulingEnablement {
     }
 
     private TaskScheduler threadPoolTaskScheduler(int poolSize, String threadNamePrefix) {

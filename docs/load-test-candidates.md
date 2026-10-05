@@ -22,7 +22,7 @@
 - `benchmarkTest` task로 분리해 일반 test 실행에서 뺀다. 통과/실패를 가리는 test가 아니다
 - `TransactionBoundaryBenchmarkSupport`의 기존 장치를 재사용한다 — 워밍업 제외, 스케줄 작업 중지, 체결 완료 검증
 - 로컬 Docker PostgreSQL 기준값임을 결과에 명시한다. 운영에서 DB가 원격이면 왕복 지연이 붙는다
-- **스케줄러를 새로 추가하면 `application-benchmark.yaml`에도 반드시 넣는다.** 이 프로파일은 스케줄 작업을 끄는 게 아니라 주기를 1시간으로 늘려 중화하는 방식이라, 목록에 빠진 스케줄러는 조용히 측정 구간에서 돈다. 특히 벤치마크 DB는 Testcontainers가 아니라 재사용되는 로컬 컨테이너라 이전 회차의 미체결 주문이 남고, 그것들은 직전 거래일 종료 이전 접수분이라 **당일 유효 주문 실효(§11.5)의 대상**이 된다. 중화하지 않으면 측정 도중 주문 row 락을 잡으며 대량으로 돈다
+- **벤치마크 프로파일은 스케줄링을 끈다**(`scheduling.enabled: false`). 예전에는 스케줄러마다 주기를 1시간으로 늘려 중화했는데, `fixedDelay`는 `initialDelay`가 없으면 기동 직후 한 번 돌기 때문에 첫 실행을 막지 못했고, 스케줄러를 추가할 때마다 목록에 넣어야 했다. 벤치마크 DB는 재사용되는 로컬 컨테이너라 이전 회차의 미체결 주문이 남고, 그것들은 **당일 유효 주문 실효(§11.5)의 대상**이라 첫 실행 한 번으로도 주문 row 락을 잡으며 대량으로 돈다. 스케줄러가 돌아가는 상태를 재야 하면 `./gradlew benchmarkTest -Pscheduling=true`로 켠다. 그때는 모든 스케줄러가 기본 주기로 돈다
 
 ---
 
@@ -238,7 +238,7 @@ POSTGRES_PORT=55432 REDIS_PORT=56379 docker compose up -d postgres redis
 | 역검증 | 매칭을 멈춘 상태와 돌리는 상태를 비교 → 느려진 원인이 정말 락 경합인지, 아니면 그냥 건수인지 |
 | 음성 대조 | 실효 대상 0건일 때 매칭 처리량에 차이가 없어야 함 |
 
-**fixture 주의.** `submittedAt`이 `@CreationTimestamp`라 대량 주문을 과거 시각으로 만들려면 저장 후 bulk update로 되돌려야 한다. `DayOrderExpiryIntegrationTest`가 쓰는 방식과 같다. 그리고 공통 실행 조건에 따라 벤치마크 프로파일에서 실효 스케줄러를 중화해 두었으므로, 이 실험은 스케줄러를 기다리지 말고 `expireDayOrders()`를 직접 호출한다.
+**fixture 주의.** `submittedAt`이 `@CreationTimestamp`라 대량 주문을 과거 시각으로 만들려면 저장 후 bulk update로 되돌려야 한다. `DayOrderExpiryIntegrationTest`가 쓰는 방식과 같다. 그리고 공통 실행 조건에 따라 벤치마크 프로파일은 스케줄링을 끄므로, 이 실험은 스케줄러를 기다리지 말고 `expireDayOrders()`를 직접 호출한다.
 
 ### 기대 결론 형태
 

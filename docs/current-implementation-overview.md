@@ -28,7 +28,7 @@
 | 보조 코드 | Lombok | 생성자, Getter, Builder 생성 |
 | 로컬 실행 | Dockerfile, Docker Compose | 애플리케이션 이미지와 PostgreSQL·Redis 포함 로컬 스택 |
 
-애플리케이션 시작 클래스에는 `@SpringBootApplication`과 `@EnableScheduling`이 선언되어 있다. 따라서 컴포넌트 스캔과 함께 시세 폴링, Toss WebSocket 관리, 매칭 Stream 소비, dirty set drain, 미체결 주문 안전망 같은 스케줄 작업이 활성화된다. 블로킹 시세 폴링, dirty drain, Toss WebSocket 상태 전이는 `SchedulingConfig`의 전용 scheduler로 분리하고, 나머지 작업은 기본 scheduler pool을 사용한다.
+`@EnableScheduling`은 `SchedulingConfig` 안의 조건부 설정에 있고 `scheduling.enabled`(기본 `true`)가 `false`면 켜지지 않는다. 켜져 있으면 시세 폴링, Toss WebSocket 관리, 매칭 Stream 소비, dirty set drain, 미체결 주문 안전망 같은 스케줄 작업이 활성화된다. 벤치마크 프로파일만 이 값을 끈다(§17.4). 블로킹 시세 폴링, dirty drain, Toss WebSocket 상태 전이는 `SchedulingConfig`의 전용 scheduler로 분리하고, 나머지 작업은 기본 scheduler pool을 사용한다.
 
 ## 3. 전체 요청 및 데이터 흐름
 
@@ -1125,6 +1125,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `spring.datasource.password` | `papertrading` | PostgreSQL 비밀번호 |
 | `spring.jpa.hibernate.ddl-auto` | `none` | 기본 schema 자동 변경 비활성화 |
 | `spring.jpa.open-in-view` | `false` | 요청 종료까지 persistence context 유지 안 함 |
+| `scheduling.enabled` | `true` | `false`면 `@Scheduled` 작업을 하나도 등록하지 않는다. 벤치마크 프로파일이 끈다 (§17.4) |
 | `spring.task.scheduling.pool.size` | 4 | 기본 scheduler pool |
 | `market-data.polling.scheduler.pool-size` | 3 | REST 시세 polling 전용 pool |
 | `matching-engine.dirty-drain.pool-size` | 1 | dirty drain 격리용 pool |
@@ -1254,8 +1255,11 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 `src/test/java/.../benchmark/`의 트랜잭션 경계 처리량 측정은 통과/실패를 가리는 test가 아니고 `docker compose`를 55432/56379로 직접 띄운 환경을 전제한다. 그래서 `test` task에서 제외하고 전용 task로 분리했다.
 
 ```bash
-./gradlew benchmarkTest
+./gradlew benchmarkTest                    # 스케줄링 꺼짐
+./gradlew benchmarkTest -Pscheduling=true  # 스케줄러가 기본 주기로 도는 상태에서 측정
 ```
+
+벤치마크 프로파일은 `scheduling.enabled: false`로 스케줄 작업을 하나도 등록하지 않는다. 주기를 늘려 중화하는 방식은 기동 직후의 첫 실행을 막지 못했고, 재사용되는 벤치마크 DB에서는 그 첫 실행(쌓인 주문 실효, 전 계좌 평가)이 측정과 겹칠 수 있었다. 측정 대상은 벤치마크가 직접 호출한다.
 
 ### 17.5 현재 빌드 상태
 
