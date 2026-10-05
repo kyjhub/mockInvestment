@@ -60,7 +60,7 @@ class OrderFillLedgerIntegrityTests {
         savingMock(LedgerEntryRepository.class)
     );
     private final OrderBookService orderBookService = mock(OrderBookService.class);
-    private final CommissionCalculator commissionCalculator = new ZeroCommissionCalculator();
+    private CommissionCalculator commissionCalculator = new ZeroCommissionCalculator();
 
     private final Map<Long, Account> accounts = new HashMap<>();
     private final Map<Long, Holding> holdings = new HashMap<>();
@@ -69,16 +69,7 @@ class OrderFillLedgerIntegrityTests {
 
     @BeforeEach
     void setUp() {
-        service = new MatchingEngineTransactionService(
-            accountRepository,
-            orderRepository,
-            executionRepository,
-            holdingRepository,
-            ledgerPostingService,
-            orderBookService,
-            commissionCalculator,
-            passThroughTransactionManager()
-        );
+        service = newService();
 
         when(accountRepository.findByIdForUpdate(anyLong()))
             .thenAnswer(call -> Optional.ofNullable(accounts.get(call.getArgument(0, Long.class))));
@@ -187,6 +178,104 @@ class OrderFillLedgerIntegrityTests {
 
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.PENDING);
         assertThat(buyOrder.getCloseReason()).isNull();
+    }
+
+    @Test
+    void buyIsCappedSoThatTheFeeStillFitsInTheCash() {
+        // 1% 수수료. 10주는 1,000 + 10 = 1,010이라 예수금 1,000을 넘는다. 체결대금만으로 캡을 씌우면
+        // cash_balance >= 0 제약에 걸려 체결 트랜잭션이 통째로 실패하고 매번 같은 자리에서 실패한다.
+        chargeFees("0.01", "0");
+        Account buyer = account(1L, "1000.00");
+        Order buyOrder = buyOrder(100L, buyer, "100.0000", 20L);
+        givenOrder(buyOrder);
+
+        service.matchOrder(100L, orderBook(ask("100.0000", 20L)));
+
+        assertThat(buyOrder.getFilledQuantity()).isEqualTo(9L);
+        // 1,000 − 900 − 수수료 9
+        assertThat(buyer.getCashBalance()).isEqualByComparingTo("91.00");
+    }
+
+    @Test
+    void buyThatCoversThePriceButNotTheFeeIsRejected() {
+        chargeFees("0.01", "0");
+        Account buyer = account(1L, "100.00");
+        Order buyOrder = buyOrder(100L, buyer, "100.0000", 1L);
+        givenOrder(buyOrder);
+
+        service.matchOrder(100L, orderBook(ask("100.0000", 1L)));
+
+        assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.REJECTED);
+        assertThat(buyOrder.getCloseReason()).isEqualTo("주문 가능 금액이 부족합니다.");
+        assertThat(buyer.getCashBalance()).isEqualByComparingTo("100.00");
+    }
+
+    @Test
+    void internalBuyerIsCappedByFeesAndTheSellerPaysFeesFromTheProceeds() {
+        chargeFees("0.01", "0");
+        Account seller = account(1L, "0.00");
+        Account buyer = account(2L, "1000.00");
+        holding(seller, 20L, "50.0000");
+        Order buyOrder = buyOrder(100L, buyer, "100.0000", 20L);
+        Order internalSell = sellOrder(200L, seller, "100.0000", 20L);
+        givenOrder(buyOrder);
+        givenInternalSellOrders(internalSell);
+
+        service.matchOrder(100L, orderBook());
+
+        assertThat(buyOrder.getFilledQuantity()).isEqualTo(9L);
+        assertThat(buyer.getCashBalance()).isEqualByComparingTo("91.00");
+        // 매도자는 받은 체결대금 900에서 수수료 9를 낸다.
+        assertThat(seller.getCashBalance()).isEqualByComparingTo("891.00");
+    }
+
+    @Test
+    void capHandlesNonLinearFeesSuchAsAMinimumCommission() {
+        // 최소 수수료 5. 수량으로 식을 역산할 수 없는 수수료 체계다.
+        // 10주 = 1,000 + 5 > 1,000, 9주 = 900 + 5 ≤ 1,000
+        chargeFees("0.001", "5.00");
+        Account buyer = account(1L, "1000.00");
+        Order buyOrder = buyOrder(100L, buyer, "100.0000", 10L);
+        givenOrder(buyOrder);
+
+        service.matchOrder(100L, orderBook(ask("100.0000", 10L)));
+
+        assertThat(buyOrder.getFilledQuantity()).isEqualTo(9L);
+        assertThat(buyer.getCashBalance()).isEqualByComparingTo("95.00");
+    }
+
+    private MatchingEngineTransactionService newService() {
+        return new MatchingEngineTransactionService(
+            accountRepository,
+            orderRepository,
+            executionRepository,
+            holdingRepository,
+            ledgerPostingService,
+            orderBookService,
+            commissionCalculator,
+            passThroughTransactionManager()
+        );
+    }
+
+    /** 운영은 수수료 0이지만 체결 경로는 수수료가 있다고 가정하고 동작해야 한다. */
+    private void chargeFees(String commissionRate, String minimumCommission) {
+        BigDecimal rate = new BigDecimal(commissionRate);
+        BigDecimal minimum = new BigDecimal(minimumCommission);
+        commissionCalculator = new CommissionCalculator() {
+            @Override
+            public BigDecimal calculateCommission(BigDecimal price, Long quantity) {
+                if (quantity == 0) {
+                    return BigDecimal.ZERO;
+                }
+                return price.multiply(BigDecimal.valueOf(quantity)).multiply(rate).max(minimum);
+            }
+
+            @Override
+            public BigDecimal calculateTax(BigDecimal price, Long quantity) {
+                return BigDecimal.ZERO;
+            }
+        };
+        service = newService();
     }
 
     /** save()가 인자를 그대로 돌려주는 repository mock. */

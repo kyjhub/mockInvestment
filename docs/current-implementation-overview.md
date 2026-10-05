@@ -1006,7 +1006,7 @@ realizedProfit += executionAmount - costBasis
 
 현재가 +10%로 바꾼 지정가다. 지정가 주문은 그보다 비싸게 체결되지 않으므로 **구속액이 실제 체결금액보다 작아지는 경우가 없다.** 예전에는 당일 고가를 썼는데, 당일 고가는 "지금까지 거래된 최고가"라 급등 구간에서 구속이 체결금액보다 작을 수 있었다.
 
-§13.9의 체결 시점 캡은 그대로 둔다. 수수료가 0이 아니게 되면 구속액과 실제 차감액이 다시 어긋날 수 있기 때문이다.
+§13.9의 체결 시점 캡은 그대로 둔다. 그 캡은 수수료·세금까지 낸 뒤에도 예수금이 음수가 되지 않는 수량으로 계산하므로(§19.4), 접수 검증이 놓친 것이 있어도 원장은 깨지지 않는다.
 
 #### 접수 순서
 
@@ -1221,7 +1221,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-25개 test class에 125개 test가 있다(벤치마크 제외).
+26개 test class에 132개 test가 있다(벤치마크 제외).
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1234,11 +1234,12 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `SymbolMatchingProcessorTests` | 4 | 단위 | 종목 lock, 결과 분류, 예외 전파, 단일 sweep |
 | `MatchingEngineStreamConsumerTests` | 3 | 단위 | 구형 호가 이벤트 이관, lock busy PEL 유지, quota ACK |
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
-| `OrderFillLedgerIntegrityTests` | 6 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정 |
+| `OrderFillLedgerIntegrityTests` | 10 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정, 수수료를 포함한 잔고 캡(정률·최소 수수료, 내부 체결 매도자 수수료) |
 | `OrderPlacementReservationIntegrationTest` | 19 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가의 지정가 변환(±10%), 현재가 밴드, 매도가능수량, 접수 검증 대기와 그 확정·거절·취소 |
 | `PriceServiceOrderPriceTests` | 5 | 단위 | 주문용 현재가의 캐시 우선, 일봉 예산 사용, 예산·공급자 실패를 예외 없이 "모름"으로 |
 | `AwaitingPriceOrderSchedulerTests` | 3 | 단위 | 종목당 1회 조회, 가격 없는 주문 대기 유지, 실패 격리 |
 | `MarketPriceLookupTests` | 3 | 단위 | 200개씩 나눠 조회, 예산 소진 시 받은 시세 유지 |
+| `SchedulingConfigTests` | 3 | 단위 | `scheduling.enabled`에 따른 스케줄 작업 등록 여부, 꺼도 스케줄러 풀 유지 |
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
 | `SelfTradeAndConstraintIntegrationTest` | 7 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 큰 주문의 완전 체결, 음수 잔고·보유 DB 거부 |
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
@@ -1266,7 +1267,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-10-05 기준 `./gradlew test`는 **125건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-10-06 기준 `./gradlew test`는 **132건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1287,7 +1288,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - 주문 목록 및 단건 조회 API
 - DLQ 검색, replay, 삭제 관리 API
 - dirty-set metric의 외부 scrape endpoint 노출과 dashboard/alert 구성
-- 수수료와 세금의 실제 현금 반영 정책. 원장 모델(FEE/TAX 분개)과 차감 경로는 있으나 계산기가 0을 반환한다. 0이 아닌 값으로 바꾸려면 체결 시점 잔고 캡이 수수료를 고려하도록 함께 고쳐야 한다
+- 수수료와 세금의 실제 값. 원장 모델(FEE/TAX 분개), 현금 차감, 수수료를 포함한 체결 시점 잔고 캡은 있으나 운영 계산기가 0을 반환한다. 미체결 주문 구속액에 수수료를 포함하는 것은 남아 있다(§19.4)
 - DB migration 또는 schema provisioning 도구
 
 ## 19. 현재 구조에서 주의할 점
@@ -1391,9 +1392,10 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | 체결 시 현금 차감과 `FEE`/`TAX` 분개 | 동작한다. `addFeePostings()`가 계좌 현금을 차감하고 비용 분개를 같은 원장 거래에 붙인다. 0이면 분개를 만들지 않는다 |
 | `executions.commission`/`tax` | 표시용 사본으로 저장된다. 대사 7·8번이 합계를 검증한다 |
 | 접수 시 구속액 | 수수료·세금 예상액을 더해 검증한다 |
-| **체결 시 잔고 캡** | **수수료를 고려하지 않는다.** `affordableQuantity()`가 체결대금만으로 수량을 정하므로, 수수료를 더하면 현금이 모자랄 수 있다. 그 경우 `cash_balance >= 0` CHECK 제약에 걸려 그 체결 트랜잭션이 실패한다 |
+| 체결 시 잔고 캡 | 동작한다. `affordableQuantity()`가 `체결대금 + 수수료 + 세금 ≤ 예수금`인 최대 수량을 구한다. 수수료 체계(정률, 최소 수수료, 구간제)마다 식이 달라 역산하지 않고, 수수료 없이 살 수 있는 수량을 상한으로 이분 탐색한다. 전제는 수량이 늘면 총비용이 줄지 않는다는 것 하나다. 수수료가 0이면 상한에서 바로 끝난다. 매도자는 받은 체결대금에서 수수료를 내므로 캡이 없다 |
+| **다른 미체결 주문의 구속액** | **수수료가 빠져 있다.** `sumReservedCash()`는 `reserved_unit_price × remaining_quantity`만 SQL로 더한다. 새 주문의 수수료는 검증에 들어가지만 이미 걸려 있는 주문들의 수수료는 주문가능금액에서 빠지지 않으므로, 수수료가 있으면 그만큼 초과 접수가 가능하다. 원장은 체결 시 잔고 캡이 지킨다 — 초과분은 체결할 때 잘리고 잔량이 거절된다 |
 
-수수료 정책을 켜기 전에 체결 시 잔고 캡이 수수료를 포함하도록 고쳐야 한다.
+체결 경로는 수수료가 있다고 가정하고 동작하므로, 운영에서는 0으로 두더라도 계산기만 바꾸면 수수료를 도입할 수 있다. 접수 단계의 보장("예수금을 넘는 주문은 접수되지 않는다")까지 수수료에 대해 지키려면 위 구속액 집계가 수수료를 포함해야 한다.
 
 ### 19.5 Redis와 DB 사이의 원자성
 

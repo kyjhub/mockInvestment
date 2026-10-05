@@ -402,14 +402,46 @@ public class MatchingEngineTransactionService {
         return executionQuantity;
     }
 
-    /** 이 가격에 몇 주까지 살 수 있는지. 잔고가 음수이거나 가격이 유효하지 않으면 0. */
+    /**
+     * 이 가격에 몇 주까지 살 수 있는지. <b>수수료·세금까지 낸 뒤에도 예수금이 음수가 되지 않는</b> 최대 수량이다.
+     * 잔고가 음수이거나 가격이 유효하지 않으면 0.
+     *
+     * <p>체결대금만으로 수량을 정하면 수수료가 0이 아닐 때 현금이 모자란다. 그러면 {@code cash_balance >= 0}
+     * 제약에 걸려 체결 트랜잭션이 통째로 실패하고, 같은 주문이 매번 같은 자리에서 실패한다.
+     *
+     * <p>수수료 체계는 계산기마다 다르다(정률, 최소 수수료, 구간제). 그래서 수량을 식으로 역산하지 않고,
+     * 수수료 없이 살 수 있는 수량을 상한으로 두고 이분 탐색한다. 전제는 하나다 — 수량이 늘면 총비용이
+     * 줄지 않는다. 수수료가 0이면 상한에서 바로 끝난다.
+     */
     private long affordableQuantity(Account account, BigDecimal executionPrice) {
         if (executionPrice == null || executionPrice.signum() <= 0) {
             return 0L;
         }
-        return account.getCashBalance()
-            .divide(executionPrice, 0, RoundingMode.DOWN)
-            .longValue();
+        BigDecimal cash = account.getCashBalance();
+        long upperBound = cash.divide(executionPrice, 0, RoundingMode.DOWN).longValue();
+        if (upperBound <= 0) {
+            return 0L;
+        }
+        if (purchaseCost(executionPrice, upperBound).compareTo(cash) <= 0) {
+            return upperBound;
+        }
+
+        long affordable = 0L;
+        long unaffordable = upperBound;
+        while (unaffordable - affordable > 1) {
+            long candidate = affordable + (unaffordable - affordable) / 2;
+            if (purchaseCost(executionPrice, candidate).compareTo(cash) <= 0) {
+                affordable = candidate;
+            } else {
+                unaffordable = candidate;
+            }
+        }
+        return affordable;
+    }
+
+    /** 매수로 실제로 빠져나가는 현금. 체결대금과 수수료·세금을 체결 경로와 같은 반올림으로 더한다. */
+    private BigDecimal purchaseCost(BigDecimal executionPrice, long quantity) {
+        return money(executionPrice.multiply(BigDecimal.valueOf(quantity))).add(fees(executionPrice, quantity).total());
     }
 
     private void executeExternalBuy(
@@ -420,9 +452,10 @@ public class MatchingEngineTransactionService {
         Long executionQuantity
     ) {
         BigDecimal executionAmount = money(executionPrice.multiply(BigDecimal.valueOf(executionQuantity)));
+        Fees buyerFees = fees(executionPrice, executionQuantity);
         // 호출자가 affordableQuantity()로 이미 캡을 씌우므로 도달할 수 없다.
         // 남겨두는 이유는 거절 조건이어서가 아니라, 캡 계산이 깨졌다는 신호이기 때문이다.
-        if (buyerAccount.getCashBalance().compareTo(executionAmount) < 0) {
+        if (buyerAccount.getCashBalance().compareTo(executionAmount.add(buyerFees.total())) < 0) {
             throw new IllegalArgumentException("주문 가능 금액이 부족합니다.");
         }
 
@@ -435,7 +468,6 @@ public class MatchingEngineTransactionService {
         postings.add(Posting.securities(buyerAccount, buyOrder.getStock(), executionAmount,
             executionQuantity, buyerHolding.getTotalPurchaseAmount()));
 
-        Fees buyerFees = fees(executionPrice, executionQuantity);
         addFeePostings(postings, buyerAccount, buyerFees);
 
         String tradeId = UUID.randomUUID().toString();
@@ -592,12 +624,11 @@ public class MatchingEngineTransactionService {
     /**
      * 수수료·세금을 현금에서 차감하고 비용 분개를 붙인다.
      *
-     * <p>0이면 아무것도 하지 않는다 — 0원 분개는 정보가 없다. 현재 {@code ZeroCommissionCalculator}라
-     * 항상 이 경로다.
+     * <p>0이면 아무것도 하지 않는다 — 0원 분개는 정보가 없다. 운영은 {@code ZeroCommissionCalculator}라
+     * 항상 이 경로지만, 체결 경로는 수수료가 있다고 가정하고 동작한다.
      *
-     * <p><b>주의</b>: 0이 아닌 계산기로 바꾸면 {@code affordableQuantity()}의 잔고 캡이 수수료를
-     * 고려하지 않아 현금이 모자랄 수 있다. 접수 시점 구속액은 이미 수수료를 포함하지만 체결 시점 캡은
-     * 아직 아니다. 수수료 정책을 켜기 전에 그 캡을 함께 고쳐야 한다.
+     * <p>매수자는 {@code affordableQuantity()}가 수수료까지 낼 수 있는 수량으로 캡을 씌운다. 매도자는 받은
+     * 체결대금에서 수수료를 내므로 캡이 없다 — 수수료가 체결대금보다 큰 계산기가 아니라면 음수가 될 수 없다.
      */
     private void addFeePostings(List<Posting> postings, Account account, Fees fees) {
         BigDecimal total = fees.total();

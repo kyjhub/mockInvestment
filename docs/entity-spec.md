@@ -804,7 +804,8 @@ Inside one fill transaction:
 1. Lock the incoming order row, then the counterparty order row.
 2. Lock participating accounts in ascending id order (at most 2).
 3. Read holdings only for accounts already locked.
-4. Cap the quantity by the seller's holding and the buyer's affordable quantity.
+4. Cap the quantity by the seller's holding and the buyer's affordable quantity — the largest quantity whose
+   price × quantity + commission + tax still fits in the buyer's cash (binary search; fee schedules may be non-linear).
    A cap of 0 is not an exception: it rejects the order (account problem) or skips the counterparty.
 5. Update holdings, account cash, realized profit, and order quantities/status.
 6. Post one ledger transaction (TRADE, FILL:{tradeId}) through LedgerPostingService.
