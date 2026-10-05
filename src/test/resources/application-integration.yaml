@@ -28,6 +28,9 @@ price:
 daily-price-range:
   polling:
     fixed-delay-ms: 3600000
+order:
+  awaiting-price:
+    fixed-delay-ms: 3600000
 matching-engine:
   stream:
     pending-recovery-delay-ms: 3600000

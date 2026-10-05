@@ -2,12 +2,14 @@ package com.papertrade.paper_trading.Service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 import com.papertrade.paper_trading.Dto.AccountBalanceResponse;
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderPlaceRequest;
+import com.papertrade.paper_trading.Dto.OrderResponse;
+import com.papertrade.paper_trading.Dto.PriceResponse;
 import com.papertrade.paper_trading.Entity.Account;
 import com.papertrade.paper_trading.Entity.Holding;
 import com.papertrade.paper_trading.Entity.Order;
@@ -31,6 +33,7 @@ import com.papertrade.paper_trading.support.ApplicationIntegrationTest;
 import com.papertrade.paper_trading.support.IntegrationTestContainers;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -51,6 +54,9 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  *
  * <p>가용잔고를 컬럼이 아니라 주문에서 파생하므로, 취소·거절 후 회복에 해제 코드가 없다는 점도
  * 함께 고정한다 — 해제를 빠뜨릴 코드 자체가 없다는 것이 이 설계의 요지다.
+ *
+ * <p>현재가는 기본적으로 <b>모르는 상태</b>다. 현재가가 필요한 test만 {@link #givenCurrentPrice}로 정한다.
+ * 모르는 상태에서 접수된 주문은 접수 검증 대기({@code AWAITING_PRICE})가 된다.
  */
 @ApplicationIntegrationTest
 class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers {
@@ -79,9 +85,9 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     @Autowired
     private OrderRepository orderRepository;
 
-    /** 시장가 구속 단가의 근거. 외부 호출 없이 값을 고정한다. */
+    /** 주문 접수에 쓰는 현재가. 외부 호출 없이 값을 고정한다. */
     @MockitoBean
-    private DailyPriceRangeService dailyPriceRangeService;
+    private PriceService priceService;
 
     private User user;
     private Account account;
@@ -114,11 +120,14 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
             .status(StockStatus.ACTIVE)
             .currency("USD")
             .build());
+        // 잔고 화면의 평가용 시세. 이 class는 평가를 검증하지 않으므로 비워 둔다.
+        when(priceService.getPrices(anyList())).thenReturn(new PriceResponse(List.of()));
     }
 
     @Test
     void secondOrderIsRejectedBecauseTheFirstOneAlreadyReservedTheCash() {
         // 예수금 100만. 100만짜리 매수 주문은 하나만 받아들여야 한다.
+        givenCurrentPrice("1000000.0000");
         orderTradingService.placeOrder(user, buyLimit("1000000.0000", 1L));
 
         assertThatThrownBy(() -> orderTradingService.placeOrder(user, buyLimit("1000000.0000", 1L)))
@@ -132,6 +141,7 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     void concurrentPlacementsCannotBothPassTheSameOrderableAmount() throws Exception {
         // 계좌 row를 잠그지 않으면 두 요청이 같은 가용잔고를 읽고 둘 다 통과한다.
         // 이 테스트가 그 lock을 지킨다.
+        givenCurrentPrice("1000000.0000");
         int attempts = 4;
         CyclicBarrier barrier = new CyclicBarrier(attempts);
         ExecutorService pool = Executors.newFixedThreadPool(attempts);
@@ -171,6 +181,7 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
 
     @Test
     void cancelingAnOrderRestoresTheOrderableAmountWithoutAnyReleaseCode() {
+        givenCurrentPrice("1000000.0000");
         var accepted = orderTradingService.placeOrder(user, buyLimit("1000000.0000", 1L));
         assertThat(accountQueryService.getBalance(user).orderableAmount()).isEqualByComparingTo("0.00");
 
@@ -184,6 +195,7 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
 
     @Test
     void balanceSeparatesDepositFromOrderableAmount() {
+        givenCurrentPrice("400000.0000");
         orderTradingService.placeOrder(user, buyLimit("400000.0000", 1L));
 
         AccountBalanceResponse balance = accountQueryService.getBalance(user);
@@ -195,27 +207,48 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     }
 
     @Test
-    void marketBuyReservesAtTheDailyHighPrice() {
-        when(dailyPriceRangeService.getDailyPriceRange(anyString()))
-            .thenReturn(new DailyPriceRangeResponse(stock.getSymbol(), null, new BigDecimal("600000.0000"), null, "USD"));
+    void marketBuyBecomesALimitOrderTenPercentAboveTheCurrentPrice() {
+        // 미국 거래소에는 그대로 낼 수 있는 시장가가 없어 국내 증권사는 직전 체결가 +10% 지정가로 낸다.
+        givenCurrentPrice("100.0000");
 
-        orderTradingService.placeOrder(user, marketBuy(1L));
+        OrderResponse accepted = orderTradingService.placeOrder(user, marketBuy(1L));
 
-        assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("600000.00");
-        // 같은 기준으로 두 번째는 막힌다 (600,000 × 2 > 1,000,000).
-        assertThatThrownBy(() -> orderTradingService.placeOrder(user, marketBuy(1L)))
-            .isInstanceOf(IllegalArgumentException.class);
+        assertThat(accepted.status()).isEqualTo(OrderStatus.PENDING);
+        assertThat(accepted.orderPrice()).isEqualByComparingTo("110.0000");
+        // 구속 단가는 바뀐 지정가 그 자체다. 그보다 비싸게 체결될 수 없으므로 정확하다.
+        assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("110.00");
     }
 
     @Test
-    void limitOrderFarOutsideTheDailyRangeIsRejected() {
+    void marketSellBecomesALimitOrderTenPercentBelowTheCurrentPrice() {
+        holdingRepository.save(holdingWith(5L));
+        givenCurrentPrice("100.0000");
+
+        OrderResponse accepted = orderTradingService.placeOrder(user, marketSell(1L));
+
+        assertThat(accepted.status()).isEqualTo(OrderStatus.PENDING);
+        assertThat(accepted.orderPrice()).isEqualByComparingTo("90.0000");
+    }
+
+    @Test
+    void marketBuyIsCheckedAgainstTheOrderableAmountAtTheConvertedPrice() {
+        // 500,000 × 1.1 = 550,000. 두 번째는 1,100,000이 되어 예수금 100만을 넘는다.
+        givenCurrentPrice("500000.0000");
+        orderTradingService.placeOrder(user, marketBuy(1L));
+
+        assertThatThrownBy(() -> orderTradingService.placeOrder(user, marketBuy(1L)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("주문가능금액이 부족합니다.");
+    }
+
+    @Test
+    void limitOrderFarOutsideTheBandIsRejected() {
         // 가격을 스스로 정해 손익을 만들어내는 경로를 좁힌다. 같은 계좌끼리는 매칭에서 막히지만,
         // 계정을 여러 개 만들어 터무니없는 가격에 맞붙이는 것은 이 검증이 막는다.
-        when(dailyPriceRangeService.getDailyPriceRange(anyString())).thenReturn(
-            new DailyPriceRangeResponse(stock.getSymbol(), null,
-                new BigDecimal("110.0000"), new BigDecimal("90.0000"), "USD"));
+        givenCurrentPrice("100.0000");
 
-        assertThatThrownBy(() -> orderTradingService.placeOrder(user, buyLimit("100000.0000", 1L)))
+        // 상한은 100 × 1.5 = 150
+        assertThatThrownBy(() -> orderTradingService.placeOrder(user, buyLimit("151.0000", 1L)))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessage("주문가격이 허용 범위를 벗어났습니다.");
     }
@@ -223,39 +256,106 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     @Test
     void limitOrderInsideTheBandIsAccepted() {
         // 저가 매수를 걸어 두는 것은 정상 거래다. 밴드가 이걸 막으면 안 된다.
-        when(dailyPriceRangeService.getDailyPriceRange(anyString())).thenReturn(
-            new DailyPriceRangeResponse(stock.getSymbol(), null,
-                new BigDecimal("110.0000"), new BigDecimal("90.0000"), "USD"));
+        givenCurrentPrice("100.0000");
 
-        // 하한은 90 × 0.7 = 63
-        orderTradingService.placeOrder(user, buyLimit("70.0000", 1L));
+        // 하한은 100 × 0.5 = 50
+        orderTradingService.placeOrder(user, buyLimit("50.0000", 1L));
 
         assertThat(acceptedOrderCount()).isEqualTo(1L);
     }
 
     @Test
-    void priceBandIsSkippedWhenTheDailyRangeIsUnavailable() {
-        // 외부 시세가 잠깐 막혔다고 정상 주문까지 거절하면 손해가 더 크다.
-        when(dailyPriceRangeService.getDailyPriceRange(anyString())).thenReturn(
-            new DailyPriceRangeResponse(stock.getSymbol(), null, null, null, "USD"));
+    void limitOrderWithoutACurrentPriceIsAcceptedButNotMatchedUntilTheBandIsChecked() {
+        // 현재가를 몰라도 주문은 받는다. 다만 밴드 검증을 거치지 않은 가격이 체결에 쓰이면 안 된다.
+        OrderResponse accepted = orderTradingService.placeOrder(user, buyLimit("100000.0000", 1L));
 
-        orderTradingService.placeOrder(user, buyLimit("100000.0000", 1L));
+        assertThat(accepted.status()).isEqualTo(OrderStatus.AWAITING_PRICE);
+        assertThat(acceptedOrderCount()).isZero();
+        // 지정가 매수는 구속 단가를 이미 알므로 대기 중에도 예수금을 묶는다.
+        assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("100000.00");
+    }
 
+    @Test
+    void awaitingLimitOrderOutsideTheBandIsRejectedOnceThePriceIsKnown() {
+        OrderResponse accepted = orderTradingService.placeOrder(user, buyLimit("100000.0000", 1L));
+
+        boolean confirmed = orderTradingService.confirmAwaitingPrice(accepted.orderId(), new BigDecimal("100.0000"));
+
+        assertThat(confirmed).isFalse();
+        Order order = orderRepository.findById(accepted.orderId()).orElseThrow();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.REJECTED);
+        assertThat(order.getCloseReason()).isEqualTo("주문가격이 허용 범위를 벗어났습니다.");
+        assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("0.00");
+    }
+
+    @Test
+    void awaitingLimitOrderInsideTheBandBecomesMatchable() {
+        OrderResponse accepted = orderTradingService.placeOrder(user, buyLimit("100.0000", 1L));
+
+        boolean confirmed = orderTradingService.confirmAwaitingPrice(accepted.orderId(), new BigDecimal("100.0000"));
+
+        assertThat(confirmed).isTrue();
         assertThat(acceptedOrderCount()).isEqualTo(1L);
     }
 
     @Test
-    void marketBuyIsRejectedWhenTheDailyHighPriceIsUnknown() {
-        when(dailyPriceRangeService.getDailyPriceRange(anyString()))
-            .thenReturn(new DailyPriceRangeResponse(stock.getSymbol(), null, null, null, "USD"));
+    void marketBuyWithoutACurrentPriceIsPricedWhenThePriceArrives() {
+        OrderResponse accepted = orderTradingService.placeOrder(user, marketBuy(1L));
 
-        assertThatThrownBy(() -> orderTradingService.placeOrder(user, marketBuy(1L)))
+        // 가격이 없으니 구속액도 아직 모른다. 0으로 두고 검증은 가격을 알게 됐을 때 한다.
+        assertThat(accepted.status()).isEqualTo(OrderStatus.AWAITING_PRICE);
+        assertThat(accepted.orderPrice()).isNull();
+        assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("0.00");
+
+        assertThat(orderTradingService.confirmAwaitingPrice(accepted.orderId(), new BigDecimal("100.0000"))).isTrue();
+
+        Order order = orderRepository.findById(accepted.orderId()).orElseThrow();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING);
+        assertThat(order.getOrderPrice()).isEqualByComparingTo("110.0000");
+        assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("110.00");
+    }
+
+    @Test
+    void awaitingMarketBuyIsRejectedIfTheCashWasUsedUpWhileItWaited() {
+        // 대기 중에는 구속액이 0이라 그사이 다른 주문이 예수금을 다 쓸 수 있다. 가격을 정할 때 다시 검증한다.
+        OrderResponse awaiting = orderTradingService.placeOrder(user, marketBuy(1L));
+        givenCurrentPrice("1000000.0000");
+        orderTradingService.placeOrder(user, buyLimit("1000000.0000", 1L));
+
+        boolean confirmed = orderTradingService.confirmAwaitingPrice(awaiting.orderId(), new BigDecimal("100.0000"));
+
+        assertThat(confirmed).isFalse();
+        Order order = orderRepository.findById(awaiting.orderId()).orElseThrow();
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.REJECTED);
+        assertThat(order.getCloseReason()).isEqualTo("주문가능금액이 부족합니다.");
+    }
+
+    @Test
+    void awaitingOrderCanBeCanceledAndIsNotConfirmedAfterwards() {
+        OrderResponse awaiting = orderTradingService.placeOrder(user, marketBuy(1L));
+
+        orderTradingService.cancelOrder(user, awaiting.orderId());
+
+        // 취소와 검증이 엇갈려도 취소된 주문이 되살아나면 안 된다.
+        assertThat(orderTradingService.confirmAwaitingPrice(awaiting.orderId(), new BigDecimal("100.0000"))).isFalse();
+        assertThat(orderRepository.findById(awaiting.orderId()).orElseThrow().getStatus())
+            .isEqualTo(OrderStatus.CANCELED);
+    }
+
+    @Test
+    void awaitingSellOrdersStillHoldTheirShares() {
+        // 대기 중인 매도도 수량을 묶어야 같은 주식을 두 번 팔지 못한다.
+        holdingRepository.save(holdingWith(5L));
+        orderTradingService.placeOrder(user, marketSell(5L));
+
+        assertThatThrownBy(() -> orderTradingService.placeOrder(user, marketSell(1L)))
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("시장가 주문을 받을 수 없습니다");
+            .hasMessage("매도가능수량이 부족합니다.");
     }
 
     @Test
     void sellOrdersAreCappedByHeldQuantityAcrossOrders() {
+        givenCurrentPrice("100.0000");
         holdingRepository.save(holdingWith(5L));
 
         orderTradingService.placeOrder(user, sellLimit("100.0000", 5L));
@@ -274,6 +374,7 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
 
     @Test
     void reservationShrinksWithTheRemainingQuantityAfterAPartialFill() {
+        givenCurrentPrice("100000.0000");
         var accepted = orderTradingService.placeOrder(user, buyLimit("100000.0000", 10L));
         assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("1000000.00");
 
@@ -297,6 +398,14 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
 
     private OrderPlaceRequest marketBuy(long quantity) {
         return new OrderPlaceRequest(null, stock.getSymbol(), OrderSide.BUY, OrderType.MARKET, null, quantity);
+    }
+
+    private OrderPlaceRequest marketSell(long quantity) {
+        return new OrderPlaceRequest(null, stock.getSymbol(), OrderSide.SELL, OrderType.MARKET, null, quantity);
+    }
+
+    private void givenCurrentPrice(String price) {
+        when(priceService.findPriceForOrder(anyString())).thenReturn(Optional.of(new BigDecimal(price)));
     }
 
     private Holding holdingWith(long quantity) {

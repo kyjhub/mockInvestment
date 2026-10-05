@@ -169,7 +169,23 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
         @Param("closedAt") LocalDateTime closedAt
     );
 
+    /**
+     * 접수 검증 대기 주문과 그 종목. 현재가를 종목 단위로 한 번에 조회하려고 종목 코드를 함께 돌려준다.
+     *
+     * <p>id 순으로 돌려준다. 주문 row를 하나씩 잠그며 처리하므로 획득 순서가 고정돼야 한다.
+     */
+    @Query("""
+        select new com.papertrade.paper_trading.Repository.OrderRepository$AwaitingPriceOrder(o.id, o.stock.symbol)
+        from Order o
+        where o.status = com.papertrade.paper_trading.Enum.OrderStatus.AWAITING_PRICE
+        order by o.id asc
+        """)
+    List<AwaitingPriceOrder> findAwaitingPriceOrders();
+
     record MatchableOrder(Long id, LocalDateTime submittedAt) {
+    }
+
+    record AwaitingPriceOrder(Long id, String symbol) {
     }
 
 }

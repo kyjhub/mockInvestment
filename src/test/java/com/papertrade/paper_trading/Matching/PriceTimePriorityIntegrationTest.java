@@ -5,7 +5,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookLevel;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
@@ -137,7 +136,7 @@ class PriceTimePriorityIntegrationTest extends IntegrationTestContainers {
 
     private void matchSymbol(Stock stock) {
         when(orderBookService.getOrderBookForMatching(anyString(), any())).thenReturn(emptyOrderBook());
-        matchingEngine.matchSymbol(stock.getSymbol(), dailyPriceRange());
+        matchingEngine.matchSymbol(stock.getSymbol());
     }
 
     private Account openAccount(String initialAmount) {
@@ -174,8 +173,4 @@ class PriceTimePriorityIntegrationTest extends IntegrationTestContainers {
             List.<OrderBookLevel>of(), List.<OrderBookLevel>of()), LocalDateTime.now());
     }
 
-    private DailyPriceRangeResponse dailyPriceRange() {
-        return new DailyPriceRangeResponse("PR", null, new BigDecimal("3000.0000"),
-            new BigDecimal("500.0000"), "USD");
-    }
 }

@@ -4,7 +4,7 @@
 
 이 문서는 현재 저장소에 실제로 구현된 기능과 각 기능의 구현 방식을 코드 기준으로 설명한다.
 
-- 기준일: 2026-08-30
+- 기준일: 2026-10-05
 - 기준 브랜치의 현재 작업 트리 기준
 - 엔티티가 존재하더라도 Controller, Service, Repository 흐름이 아직 없는 기능은 "현재 구현 경계"에서 별도로 구분한다.
 - 도메인 모델의 컬럼과 관계에 대한 상세 명세는 `docs/entity-spec.md`를 참고한다.
@@ -360,7 +360,9 @@ SUBSCRIBE /topic/prices/{symbol}
 5. 각 가격을 `price:updates` Pub/Sub로 발행한다.
 6. 가능한 결과를 요청 심볼 순서로 정렬해 반환한다.
 
-기본 현재가 cache TTL은 2초다.
+기본 현재가 cache TTL은 30초다. 구독 중인 종목은 §8.3 폴링이 1초마다 덮어쓰므로 이 값과 무관하게 신선하고, TTL이 의미를 갖는 것은 구독이 없는 종목이다. 이 TTL은 **주문 접수가 허용하는 현재가의 나이**이기도 하다(§11.2) — 키가 살아 있으면 TTL 안에 받은 값이다.
+
+`MarketPriceLookup`(평가·접수 검증 대기 주문용)은 종목이 200개를 넘으면 200개씩 나눠 `getPrices()`를 부른다. 중간에 예산이 떨어지면 받은 시세까지만 돌려주고 남은 묶음은 건너뛴다.
 
 ### 8.3 폴링
 
@@ -394,18 +396,9 @@ GET /api/v1/candles
 
 `DailyPriceRangeService`는 `daily-price-range:{symbol}` Redis cache를 먼저 읽고, cache miss일 때만 Toss API를 호출한다. 기본 TTL은 5초다.
 
-### 9.3 체결가 반영
+### 9.3 주문·매칭에서의 사용
 
-매칭 엔진에서 체결이 발생하면 `updateWithExecutionPrice()`를 호출한다.
-
-- 체결가가 현재 일일 고가보다 높으면 고가를 갱신한다.
-- 체결가가 현재 일일 저가보다 낮으면 저가를 갱신한다.
-- 값이 바뀐 경우 cache를 다시 저장하고 Pub/Sub로 발행한다.
-
-시장가 주문이 일부만 체결되고 잔량이 남으면 다음 대기 가격을 정하는 데도 사용한다.
-
-- 시장가 매수 잔량: 현재 일일 고가를 `orderPrice`로 설정
-- 시장가 매도 잔량: 현재 일일 저가를 `orderPrice`로 설정
+없다. 시장가는 접수할 때 현재가 ±10%의 지정가로, 지정가 밴드는 현재가 ±50%로 바뀌었다(§11.2, §13.10). 매칭도 더 이상 고저가를 조회하거나 체결가로 갱신하지 않는다. 남은 용도는 화면 표시뿐이다.
 
 ### 9.4 폴링
 
@@ -471,17 +464,47 @@ Redis 메시지를 DTO로 역직렬화한 뒤 `SimpMessagingTemplate`로 해당 
 
 ### 11.2 주문 접수
 
-`OrderTradingService.placeOrder()`은 하나의 DB transaction에서 다음을 수행한다.
+`OrderTradingService.placeOrder()`는 외부 호출을 트랜잭션 밖에 두기 위해 세 단계로 나뉜다.
 
-1. 인증 사용자가 존재하는지 확인한다.
-2. 지정가 주문은 가격이 필수인지 확인한다.
-3. 시장가 주문에는 가격이 없는지 확인한다.
-4. 사용자 ID로 계좌를 조회한다.
-5. `clientOrderId`가 있으면 `(account_id, client_order_id)`로 기존 주문을 조회한다.
-6. 기존 주문이 있으면 새 주문을 만들지 않고 기존 주문과 체결 이력을 반환한다.
-7. 심볼로 종목을 조회한다.
-8. `PENDING`, `filledQuantity=0`, `remainingQuantity=orderQuantity` 상태의 주문을 저장한다.
-9. DB commit 후 `symbols:match-requested` Stream에 이벤트를 발행한다.
+```text
+① 짧은 읽기 transaction   계좌·종목 확인, 멱등 재요청이면 기존 주문 반환
+② transaction 밖          현재가 조회 (PriceService.findPriceForOrder)
+③ 쓰기 transaction        멱등 재확인 → 가격 결정·밴드 검증 → 계좌 row lock → 구속액 검증 → 저장
+```
+
+**한 transaction으로 묶지 않는 이유는 커넥션이다.** `JpaTransactionManager`는 transaction을 시작할 때 커넥션을 가져오므로, 계좌 락을 토스 호출 뒤에 잡더라도 커넥션은 그동안 쥐고 있게 된다. 커넥션 풀은 매칭 엔진과 공유하므로 토스가 느리면 체결이 멈춘다. ③에서 멱등을 다시 확인하는 것은 ①과 ③ 사이에 같은 요청이 먼저 저장될 수 있어서다.
+
+#### 현재가 조회
+
+1. `price:{symbol}` 캐시. TTL 30초라 키가 있으면 30초 안의 값이다.
+2. 없으면 **일봉 종가**로 한 종목만 조회한다. 현재가 API는 호가와 같은 `market-data` 예산이라 주문이 몰릴 때마다 부르면 매칭용 호가 조회를 밀어낸다. 일봉은 별도 예산(`market-data-chart`)이다. 정규장 중 일봉 종가가 현재가 API의 `lastPrice`와 같음을 실측했다(2026-10-05, AAPL·TSLA·NVDA 3회 일치). 프리·애프터마켓은 미검증이다. 받은 값은 같은 캐시에 넣는다.
+3. 어떤 이유로 실패하든(예산·타임아웃·공급자 오류) 예외를 올리지 않고 "현재가 모름"으로 끝낸다.
+
+캐시된 현재가가 몇 초 낡아도 **정합성은 깨지지 않는다.** 시장가 매수의 구속 단가는 바뀐 지정가 그 자체이고 지정가는 그보다 비싸게 체결되지 않는다. 낡은 값은 즉시 체결 여부에만 영향을 준다.
+
+#### 주문 유형별 처리
+
+| 주문 | 현재가를 알 때 | 모를 때 |
+| --- | --- | --- |
+| 지정가 | 현재가 ±50% 밴드 검증 후 `PENDING` | `AWAITING_PRICE`로 저장. 매수는 지정가로 구속액을 검증한다 |
+| 시장가 매수 | 현재가 +10% 지정가로 바꾸고 구속액 검증 후 `PENDING` | `AWAITING_PRICE`. 가격·구속 단가 `null`, 구속액 0 |
+| 시장가 매도 | 현재가 −10% 지정가로 바꿔 `PENDING` | `AWAITING_PRICE`. 가격 `null` |
+| 모든 매도 | 매도가능수량 검증 | 매도가능수량 검증 |
+
+`PENDING`으로 저장한 주문만 commit 후 매칭 이벤트를 발행한다.
+
+#### 접수 검증 대기 (`AWAITING_PRICE`)
+
+현재가를 몰라도 주문은 받는다. 다만 **밴드 검증을 거치지 않은 지정가가 체결에 쓰이면 안 되므로** 매칭 대상(`PENDING`, `PARTIALLY_FILLED`)에서 뺀다. 구속 대상·취소·장 마감 실효 대상에는 포함한다.
+
+`AwaitingPriceOrderScheduler`가 `order.awaiting-price.fixed-delay-ms`(기본 1초)마다 대기 주문의 종목을 모아 `MarketPriceLookup`으로 **현재가 API를 일괄 조회**한다(200종목에 1회, 캐시 우선). 주문 접수와 달리 여러 종목을 다루므로 현재가 API가 맞다. 가격을 얻은 주문마다 `OrderTradingService.confirmAwaitingPrice()`가 한 transaction에서 검증을 마친다.
+
+- 주문 row를 잠근 뒤 상태를 다시 본다. 그사이 취소·실효됐으면 아무것도 하지 않는다.
+- 지정가: 밴드 밖이면 거절(`주문가격이 허용 범위를 벗어났습니다.`).
+- 시장가: 가격을 정한다. 매수는 계좌 row를 잠그고 구속액을 검증한다 — 대기 중에는 구속액이 0이라 그사이 다른 주문이 예수금을 썼을 수 있다. 부족하면 거절(`주문가능금액이 부족합니다.`).
+- 통과하면 `PENDING`으로 바꾸고 commit 후 매칭 이벤트를 발행한다.
+
+락 순서는 매칭과 같다(주문 → 계좌). 현재가를 못 구한 주문은 다음 주기에 다시 시도하며, 대기가 길어져도 장 마감 실효(§11.5)가 상한이다.
 
 Stream 이벤트는 다음 값을 가진다.
 
@@ -548,7 +571,7 @@ Stream.of(calendar.today(), calendar.previousBusinessDay())
 만료 대상은 다음과 같다.
 
 ```text
-status in (PENDING, PARTIALLY_FILLED)
+status in (AWAITING_PRICE, PENDING, PARTIALLY_FILLED)
   and submitted_at < 직전에 끝난 거래일의 애프터마켓 종료 시각
 ```
 
@@ -621,7 +644,7 @@ Publisher는 `MAXLEN` approximate trimming을 적용한다. 기본 source Stream
 
 ### 12.5 API 예산 부족 처리
 
-호가나 일일 고저가 cache가 없고 Toss API 예산도 없으면 `TossApiQuotaUnavailableException`이 발생한다. 이 경우 현재 Stream 레코드는 ACK한다.
+매칭 도중 호가 cache가 없고 Toss API 예산도 없으면 `TossApiQuotaUnavailableException`이 발생한다. 매칭은 더 이상 일일 고저가를 조회하지 않으므로 캔들 예산과는 무관하다. 이 경우 현재 Stream 레코드는 ACK한다.
 
 다음 기회는 다음 중 하나가 만든 새 종목 이벤트로 제공된다.
 
@@ -812,7 +835,7 @@ matchOrder(주문)                       ← 트랜잭션 밖. loop를 돌린다
 
 두 값 중 더 높은 가격을 우선 사용한다. 가격이 같으면 내부 주문을 선택한다.
 
-지정가 주문은 주문가격 조건을 만족하는 내부 주문과 외부 호가만 후보로 사용한다. 시장가 주문의 최초 `orderPrice`는 `null`이므로 가격 제한 없이 후보를 선택한다.
+주문가격 조건을 만족하는 내부 주문과 외부 호가만 후보로 사용한다. 시장가 주문도 접수할 때 현재가 ±10%의 지정가로 바뀌므로(§11.2) 같은 규칙을 따른다 — 그 가격 안의 반대편 호가는 모두 소비하고 남은 수량은 그 가격에서 대기한다. 국내 증권사가 미국 주식 시장가를 처리하는 방식과 같다.
 
 외부 호가 수량을 어디까지 소비하는지는 §19.3의 정책을 따른다. 한 주문 안에서는 소비하고, 주문과 주문 사이에서는 소비하지 않는다.
 
@@ -953,17 +976,17 @@ realizedProfit += executionAmount - costBasis
 
 막는 것은 이것이다 — 자기 자신과 체결하면 현금이 나갔다 들어와 순변동이 0인데 `REALIZED_PNL` 분개는 그대로 적립되고 평균단가도 바뀐다. 양쪽 가격을 스스로 정할 수 있으므로 원하는 만큼 손익을 만들어낼 수 있었다. 원장 균형은 깨지지 않지만 실현손익이 오염된다.
 
-**지정가 주문가격은 당일 거래 범위 ±`order.price-band.margin`(기본 0.3) 안이어야 한다.**
+**지정가 주문가격은 현재가 ±`order.price-band.margin`(기본 0.5) 안이어야 한다.**
 
 ```text
-허용 범위 = [dailyLowPrice × (1 − margin), dailyHighPrice × (1 + margin)]
+허용 범위 = [currentPrice × (1 − margin), currentPrice × (1 + margin)]
 ```
 
-미국 시장에는 일일 가격제한폭 제도가 없으므로 이건 규제 한도가 아니라 **오입력 방지 장치**다. 저가 매수·고가 매도를 걸어 두는 정상 주문을 막지 않도록 넉넉하게 잡는다. 국내 종목이 들어오면 전일 종가 ±30%라는 진짜 제한폭을 쓸 수 있다.
+미국 시장에는 일일 가격제한폭 제도가 없으므로 이건 규제 한도가 아니라 **오입력 방지 장치**다. 저가 매수·고가 매도를 걸어 두는 정상 주문을 막지 않도록 넉넉하게 잡는다.
 
 같은 계좌 차단만으로는 **서로 다른 계좌가 터무니없는 가격에 맞붙는 것**을 막지 못한다. 한쪽이 잃고 한쪽이 얻는 구조라 공짜는 아니지만, 계정을 여러 개 만들면 한 계정을 희생시켜 다른 계정의 손익을 부풀릴 수 있다. 가격 밴드가 그 폭을 좁힌다.
 
-시세를 구하지 못하면 이 검증을 건너뛴다. 정합성 요건이 아니라 방어 장치이고, 외부 시세가 잠깐 막혔다고 정상 주문까지 거절하면 손해가 더 크다.
+현재가를 구하지 못해도 **이 검증을 건너뛰지 않는다.** 주문을 접수 검증 대기로 받고, 현재가를 확보한 뒤 검증한다(§11.2). 검증을 거치지 않은 지정가가 체결에 쓰이면 위 경로가 다시 열린다.
 
 ### 13.11 가용잔고(주문가능금액)와 접수 시점 검증
 
@@ -989,29 +1012,25 @@ realizedProfit += executionAmount - costBasis
 
 #### `orders.reserved_unit_price`
 
-매수 주문이 1주당 구속하는 금액을 접수 시점에 정해 저장한다. 지정가는 주문가격, 시장가는 당일 고가다. 매도 주문은 `null`이다.
+매수 주문이 1주당 구속하는 금액을 접수 시점에 정해 저장한다. **주문가격 그 자체**다 — 시장가도 접수할 때 지정가로 바뀌므로 같다. 매도 주문과 가격이 아직 없는 접수 검증 대기 주문은 `null`이다.
 
 파생값을 저장하는 것처럼 보이지만 성격이 다르다. **주문의 불변 속성**이라 드리프트가 생길 수 없고, 덕분에 구속액 집계가 외부 시세 조회 없이 `orders` 한 테이블에서 순수 SQL로 끝난다. 계좌 row lock을 쥔 채 Toss를 기다리는 일이 없어야 하므로 이 점이 중요하다.
 
 #### 시장가 매수의 구속 단가
 
-`DailyPriceRangeResponse.dailyHighPrice`(당일 고가)를 쓴다. §13.7의 `applyMarketOrderRemainingPrice()`가 시장가 잔여 물량의 대기 가격으로 심는 값과 같아서, 구속 기준이 주문 생애 내내 한 가지로 이어진다.
+현재가 +10%로 바꾼 지정가다. 지정가 주문은 그보다 비싸게 체결되지 않으므로 **구속액이 실제 체결금액보다 작아지는 경우가 없다.** 예전에는 당일 고가를 썼는데, 당일 고가는 "지금까지 거래된 최고가"라 급등 구간에서 구속이 체결금액보다 작을 수 있었다.
 
-당일 고가를 구할 수 없으면 **접수를 거절한다.** 구속 금액을 계산할 수 없는 주문을 받아들이면 규칙에 구멍이 생긴다.
-
-당일 고가는 "지금까지 거래된 최고가"지 "오늘 도달 가능한 최고가"가 아니다. 급등 구간에서는 구속이 실제 체결금액보다 작을 수 있는데, 그때는 §13.9의 체결 시점 캡이 방어선이 된다 — 살 수 있는 만큼만 체결되고 잔량은 거절된다. **접수 검증과 체결 검증의 2중 구조**이며, 접수 검증이 생긴 뒤에도 §13.8을 남겨 두는 이유가 이것이다.
-
-국내 주식은 전일 종가 × 1.3(KONEX × 1.15)이라는 진짜 상한가가 있어 당일 고가보다 안전한 기준이지만, 전일 종가를 구할 경로가 없고 국내 종목 거래 자체가 미구현이라 국내 종목 지원과 함께 다룬다.
+§13.9의 체결 시점 캡은 그대로 둔다. 수수료가 0이 아니게 되면 구속액과 실제 차감액이 다시 어긋날 수 있기 때문이다.
 
 #### 접수 순서
 
 ```text
 1. 요청 검증 (지정가/시장가 가격 유무)
-2. 계좌 조회 (락 없음)
-3. 멱등 재요청이면 기존 주문 반환 — 검증보다 먼저. 이미 접수된 주문을 재검증하면
-   그 사이 잔고가 줄었을 때 같은 요청이 성공했다가 실패한다
-4. 종목 조회
-5. 구속 단가 계산 — 시세 조회가 필요할 수 있으므로 락을 잡기 전에 끝낸다
+2. [읽기 tx] 계좌·종목 조회, 멱등 재요청이면 기존 주문 반환 — 검증보다 먼저. 이미 접수된 주문을
+   재검증하면 그 사이 잔고가 줄었을 때 같은 요청이 성공했다가 실패한다
+3. [tx 밖] 현재가 조회
+4. [쓰기 tx] 멱등 재확인
+5. 주문가격·구속 단가 결정, 지정가 밴드 검증
 6. 계좌 row 잠금 (findByIdForUpdate)
 7. 구속액 집계 + 검증
 8. 주문 저장
@@ -1151,13 +1170,15 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `orderbook.polling.staleness-threshold-ms` | 30000 | WebSocket 담당 cache의 REST fallback 기준 |
 | `orderbook.active-symbols.refresh-ms` | 5000 | 로컬 STOMP 호가 구독 heartbeat |
 | `orderbook.active-symbols.ttl-ms` | 30000 | 전역 활성 구독 종목 만료 기준 |
-| `price.cache.ttl-seconds` | 2 | 현재가 cache TTL |
+| `price.cache.ttl-seconds` | 30 | 현재가 cache TTL. 주문 접수가 허용하는 현재가의 나이 (§11.2) |
 | `price.polling.fixed-delay-ms` | 1000 | 현재가 polling 간격 |
 | `price.polling.lock-ttl-ms` | 900 | 현재가 polling lock TTL |
 | `daily-price-range.cache.ttl-seconds` | 5 | 일일 고저가 cache TTL |
 | `daily-price-range.polling.fixed-delay-ms` | 1000 | 일일 고저가 polling 간격 |
 | `daily-price-range.polling.lock-ttl-ms` | 900 | 일일 고저가 polling lock TTL |
-| `order.price-band.margin` | 0.3 | 지정가 주문가격이 당일 거래 범위에서 벗어날 수 있는 비율 (§13.10) |
+| `order.price-band.margin` | 0.5 | 지정가 주문가격이 현재가에서 벗어날 수 있는 비율 (§13.10) |
+| `order.market-price.margin` | 0.1 | 시장가 주문을 지정가로 바꿀 때 현재가에 더하고 빼는 비율 (§11.2) |
+| `order.awaiting-price.fixed-delay-ms` | 1000 | 접수 검증 대기 주문의 검증 주기 (§11.2) |
 | `order.day-expiry.fixed-delay-ms` | 60000 | 당일 유효 주문 실효 확인 간격 (§11.5) |
 | `valuation.total-asset.fixed-delay-ms` | 60000 | `accounts.total_asset_value` 갱신 간격 |
 | `ledger.reconciliation.cron` | `0 30 5 * * *` | 원장 대사 실행 시각 (§13.12) |
@@ -1181,7 +1202,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | Scheduler bean | Thread 수 | 담당 작업 |
 | --- | ---: | --- |
 | `taskScheduler` | 4 | 활성 호가 종목 heartbeat, Stream 신규/PEL 소비, 30초 안전망 등 기본 작업 |
-| `marketDataPollingScheduler` | 3 | 호가·현재가·일일 고저가 REST polling |
+| `marketDataPollingScheduler` | 3 | 호가·현재가·일일 고저가 REST polling, 접수 검증 대기 주문 검증 |
 | `dirtyDrainScheduler` | 1 | dirty set drain과 종목 매칭 |
 | `webSocketScheduler` | 1 고정 | Toss 슬롯 생애주기, 구독 배정·선언, ping |
 
@@ -1216,7 +1237,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-22개 test class에 107개 test가 있다.
+25개 test class에 125개 test가 있다(벤치마크 제외).
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1230,7 +1251,11 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `MatchingEngineStreamConsumerTests` | 3 | 단위 | 구형 호가 이벤트 이관, lock busy PEL 유지, quota ACK |
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
 | `OrderFillLedgerIntegrityTests` | 6 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정 |
-| `OrderPlacementReservationIntegrationTest` | 12 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가 구속 단가, 매도가능수량, 주문가격 밴드 |
+| `OrderPlacementReservationIntegrationTest` | 19 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가의 지정가 변환(±10%), 현재가 밴드, 매도가능수량, 접수 검증 대기와 그 확정·거절·취소 |
+| `PriceServiceOrderPriceTests` | 5 | 단위 | 주문용 현재가의 캐시 우선, 일봉 예산 사용, 예산·공급자 실패를 예외 없이 "모름"으로 |
+| `AwaitingPriceOrderSchedulerTests` | 3 | 단위 | 종목당 1회 조회, 가격 없는 주문 대기 유지, 실패 격리 |
+| `MarketPriceLookupTests` | 3 | 단위 | 200개씩 나눠 조회, 예산 소진 시 받은 시세 유지 |
+
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
 | `SelfTradeAndConstraintIntegrationTest` | 7 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 큰 주문의 완전 체결, 음수 잔고·보유 DB 거부 |
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
@@ -1255,7 +1280,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-09-13 기준 `./gradlew test --rerun-tasks`는 **107건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-10-05 기준 `./gradlew test`는 **125건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1393,4 +1418,4 @@ Redis 슬롯 lock은 계정의 동시 WebSocket 연결 수를 2개로 제한하�
 
 `application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `SPRING_JPA_DDL_AUTO=update`와 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
 
-다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.close_reason`(§13.9), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. `close_reason`은 `reject_reason`을 이름만 바꾼 것이고(§11.5), `order_status` 값에 `EXPIRED`가 추가되었다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
+다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.close_reason`(§13.9), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. `close_reason`은 `reject_reason`을 이름만 바꾼 것이고(§11.5), `order_status` 값에 `EXPIRED`와 `AWAITING_PRICE`(§11.2)가 추가되었다. Hibernate가 enum 컬럼에 만든 `CHECK` 제약이 있다면 새 값을 허용하도록 바꿔야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.

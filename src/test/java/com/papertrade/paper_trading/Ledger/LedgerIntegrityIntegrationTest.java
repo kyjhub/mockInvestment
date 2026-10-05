@@ -3,7 +3,6 @@ package com.papertrade.paper_trading.Ledger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookLevel;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
@@ -87,7 +86,7 @@ class LedgerIntegrityIntegrationTest extends IntegrationTestContainers {
         Stock stock = persistStock();
         Order buyOrder = persistOrder(account, stock, OrderSide.BUY, "100000.0000", 3L);
 
-        matchingEngine.matchOrder(buyOrder.getId(), orderBookWithAsk("100000.0000", 3L), dailyPriceRange());
+        matchingEngine.matchOrder(buyOrder.getId(), orderBookWithAsk("100000.0000", 3L));
 
         Account reloaded = accountRepository.findById(account.getId()).orElseThrow();
         assertThat(reloaded.getCashBalance()).isEqualByComparingTo("700000.00");
@@ -110,7 +109,7 @@ class LedgerIntegrityIntegrationTest extends IntegrationTestContainers {
         Stock stock = persistStock();
         Order buyOrder = persistOrder(account, stock, OrderSide.BUY, "100000.0000", 1L);
 
-        matchingEngine.matchOrder(buyOrder.getId(), orderBookWithAsk("100000.0000", 1L), dailyPriceRange());
+        matchingEngine.matchOrder(buyOrder.getId(), orderBookWithAsk("100000.0000", 1L));
 
         Execution execution = executionRepository.findByOrderIdOrderByIdAsc(buyOrder.getId()).get(0);
         assertThat(execution.getTradeId()).isNotBlank();
@@ -135,7 +134,7 @@ class LedgerIntegrityIntegrationTest extends IntegrationTestContainers {
         Order sellOrder = persistOrder(seller, stock, OrderSide.SELL, "100000.0000", 2L);
         Order buyOrder = persistOrder(buyer, stock, OrderSide.BUY, "100000.0000", 2L);
 
-        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook(), dailyPriceRange());
+        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook());
 
         Execution buyExecution = executionRepository.findByOrderIdOrderByIdAsc(buyOrder.getId()).get(0);
         Execution sellExecution = executionRepository.findByOrderIdOrderByIdAsc(sellOrder.getId()).get(0);
@@ -253,8 +252,4 @@ class LedgerIntegrityIntegrationTest extends IntegrationTestContainers {
         return new OrderBookResponse(new OrderBookResult(null, "USD", List.of(), List.of()), LocalDateTime.now());
     }
 
-    private DailyPriceRangeResponse dailyPriceRange() {
-        return new DailyPriceRangeResponse("LG", null, new BigDecimal("200000.0000"),
-            new BigDecimal("1000.0000"), "USD");
-    }
 }

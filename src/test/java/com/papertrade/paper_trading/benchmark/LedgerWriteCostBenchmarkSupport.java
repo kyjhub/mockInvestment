@@ -2,7 +2,6 @@ package com.papertrade.paper_trading.benchmark;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
 import com.papertrade.paper_trading.Entity.Account;
@@ -166,9 +165,6 @@ abstract class LedgerWriteCostBenchmarkSupport {
         int fills = 100;
         List<Long> latencies = new ArrayList<>();
         String tag = UUID.randomUUID().toString().substring(0, 4);
-        DailyPriceRangeResponse dailyRange = new DailyPriceRangeResponse(
-            "LBF", OffsetDateTime.now(),
-            new BigDecimal("1000.0000"), new BigDecimal("1.0000"), "USD");
         OrderBookResponse emptyBook = new OrderBookResponse(
             new OrderBookResult(OffsetDateTime.now(), "USD", List.of(), List.of()),
             java.time.LocalDateTime.now());
@@ -176,7 +172,7 @@ abstract class LedgerWriteCostBenchmarkSupport {
         for (int i = 0; i < fills; i++) {
             Long buyOrderId = seedMatchablePair(tag + "-" + i);
             long began = System.nanoTime();
-            matchingService.matchOrder(buyOrderId, emptyBook, dailyRange);
+            matchingService.matchOrder(buyOrderId, emptyBook);
             latencies.add((System.nanoTime() - began) / 1_000);
         }
         Collections.sort(latencies);

@@ -2,7 +2,6 @@ package com.papertrade.paper_trading.benchmark;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookLevel;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
@@ -134,7 +133,6 @@ abstract class TransactionBoundaryBenchmarkSupport {
     }
 
     private Result run(boolean externalCallInsideTransaction, int threads, List<Target> targets) throws Exception {
-        DailyPriceRangeResponse dailyRange = dailyRange();
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         CountDownLatch start = new CountDownLatch(1);
         List<Future<Long>> futures = new ArrayList<>();
@@ -144,9 +142,9 @@ abstract class TransactionBoundaryBenchmarkSupport {
                 start.await();
                 long began = System.nanoTime();
                 if (externalCallInsideTransaction) {
-                    matchWithExternalCallInsideTransaction(target, dailyRange);
+                    matchWithExternalCallInsideTransaction(target);
                 } else {
-                    matchWithExternalCallOutsideTransaction(target, dailyRange);
+                    matchWithExternalCallOutsideTransaction(target);
                 }
                 return (System.nanoTime() - began) / 1_000_000;
             }));
@@ -168,18 +166,18 @@ abstract class TransactionBoundaryBenchmarkSupport {
     }
 
     /** 커밋 45f18af 시점의 순서: 락을 먼저 잡고 트랜잭션 안에서 외부 응답을 기다린다. */
-    private void matchWithExternalCallInsideTransaction(Target target, DailyPriceRangeResponse dailyRange) {
+    private void matchWithExternalCallInsideTransaction(Target target) {
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             orderRepository.findByIdForUpdate(target.orderId());
             OrderBookResponse orderBook = fetchExternalOrderBook();
-            matchingService.matchOrder(target.orderId(), orderBook, dailyRange);
+            matchingService.matchOrder(target.orderId(), orderBook);
         });
     }
 
     /** 현재 코드의 순서: 외부 응답을 먼저 받아둔 뒤 트랜잭션을 연다. */
-    private void matchWithExternalCallOutsideTransaction(Target target, DailyPriceRangeResponse dailyRange) {
+    private void matchWithExternalCallOutsideTransaction(Target target) {
         OrderBookResponse orderBook = fetchExternalOrderBook();
-        matchingService.matchOrder(target.orderId(), orderBook, dailyRange);
+        matchingService.matchOrder(target.orderId(), orderBook);
     }
 
     /** 외부 API 호출을 흉내 낸다. 네트워크를 타지 않으므로 지연 시간이 변동 없이 고정된다. */
@@ -198,17 +196,6 @@ abstract class TransactionBoundaryBenchmarkSupport {
                 List.of(new OrderBookLevel(ORDER_PRICE, ORDER_QUANTITY))
             ),
             LocalDateTime.now()
-        );
-    }
-
-    /** 체결가가 고가·저가 사이라 updateWithExecutionPrice()가 캐시를 건드리지 않고 즉시 반환한다. */
-    private DailyPriceRangeResponse dailyRange() {
-        return new DailyPriceRangeResponse(
-            "BENCH",
-            OffsetDateTime.now(),
-            new BigDecimal("1000.0000"),
-            new BigDecimal("1.0000"),
-            "USD"
         );
     }
 

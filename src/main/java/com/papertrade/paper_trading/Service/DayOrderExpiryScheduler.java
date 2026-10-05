@@ -34,6 +34,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class DayOrderExpiryScheduler {
 
     private static final List<OrderStatus> EXPIRABLE_STATUSES = List.of(
+        OrderStatus.AWAITING_PRICE,
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
     );

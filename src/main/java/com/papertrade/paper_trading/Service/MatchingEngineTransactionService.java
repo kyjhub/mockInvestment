@@ -1,6 +1,5 @@
 package com.papertrade.paper_trading.Service;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookLevel;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Entity.Account;
@@ -12,7 +11,6 @@ import com.papertrade.paper_trading.Enum.LedgerAccount;
 import com.papertrade.paper_trading.Enum.LedgerTransactionType;
 import com.papertrade.paper_trading.Enum.OrderSide;
 import com.papertrade.paper_trading.Enum.OrderStatus;
-import com.papertrade.paper_trading.Enum.OrderType;
 import com.papertrade.paper_trading.Repository.AccountRepository;
 import com.papertrade.paper_trading.Repository.ExecutionRepository;
 import com.papertrade.paper_trading.Repository.HoldingRepository;
@@ -57,12 +55,11 @@ public class MatchingEngineTransactionService {
     private final ExecutionRepository executionRepository;
     private final HoldingRepository holdingRepository;
     private final LedgerPostingService ledgerPostingService;
-    private final DailyPriceRangeService dailyPriceRangeService;
     private final OrderBookService orderBookService;
     private final CommissionCalculator commissionCalculator;
     private final PlatformTransactionManager transactionManager;
 
-    public void matchSymbol(String symbol, DailyPriceRangeResponse dailyPriceRange) {
+    public void matchSymbol(String symbol) {
         List<MatchableOrder> matchableOrders = orderRepository.findMatchableOrdersBySymbol(symbol, MATCHABLE_STATUSES);
         for (MatchableOrder matchableOrder : matchableOrders) {
             // Toss 호출은 주문의 pessimistic lock을 잡기 전, transaction 밖에서 수행한다.
@@ -70,7 +67,7 @@ public class MatchingEngineTransactionService {
             OrderBookResponse orderBook = orderBookService.getOrderBookForMatching(symbol, matchableOrder.submittedAt());
             Long orderId = matchableOrder.id();
             try {
-                matchOrder(orderId, orderBook, dailyPriceRange);
+                matchOrder(orderId, orderBook);
             } catch (IllegalArgumentException e) {
                 // 체결 수량에 잔고·보유 캡을 미리 씌우므로, 여기까지 오는 예외는 정상적인 "조건 미달"이 아니라
                 // 데이터 불일치 신호다. 그래도 루프는 중단하지 않는다 — 중단하면 뒤에 줄 선 정상 주문까지
@@ -100,22 +97,17 @@ public class MatchingEngineTransactionService {
      *
      * <p>종목 락이 같은 종목의 동시 매칭을 막으므로, 트랜잭션이 끊기는 사이에 다른 매칭이 끼어들지 않는다.
      */
-    public void matchOrder(Long orderId, OrderBookResponse orderBook, DailyPriceRangeResponse dailyPriceRange) {
+    public void matchOrder(Long orderId, OrderBookResponse orderBook) {
         TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
-        MatchCursor cursor = MatchCursor.initial(dailyPriceRange);
+        MatchCursor cursor = MatchCursor.initial();
         while (true) {
             MatchCursor current = cursor;
             MatchCursor next = transactionTemplate.execute(ignored -> matchOnce(orderId, orderBook, current));
             if (next == null || next.finished()) {
-                cursor = next == null ? current : next;
                 break;
             }
             cursor = next;
         }
-
-        // 시장가 잔여 물량의 대기 가격은 체결이 다 끝난 뒤 한 번만 심는다.
-        DailyPriceRangeResponse finalRange = cursor.dailyPriceRange();
-        transactionTemplate.executeWithoutResult(ignored -> applyMarketOrderRemainingPrice(orderId, finalRange));
     }
 
     /**
@@ -184,8 +176,7 @@ public class MatchingEngineTransactionService {
                 // 상대 매도자의 보유가 비어 있다. 같은 후보를 다시 뽑으면 무한 루프이므로 제외하고 계속한다.
                 return cursor.exclude(internalSellOrder.getId());
             }
-            return cursor.withDailyPriceRange(dailyPriceRangeService.updateWithExecutionPrice(
-                buyOrder.getStock().getSymbol(), cursor.dailyPriceRange(), executionPrice));
+            return cursor;
         }
 
         Map<Long, Account> lockedAccounts = lockAccountsInIdOrder(buyOrder.getAccount().getId());
@@ -208,10 +199,7 @@ public class MatchingEngineTransactionService {
         ).orElseGet(() -> holdingRepository.save(Holding.create(buyerAccount, buyOrder.getStock())));
         executeExternalBuy(buyOrder, buyerAccount, buyerHolding, externalAsk.price(), executionQuantity);
 
-        return cursor
-            .consumeExternal(executionQuantity, externalAsk.volume())
-            .withDailyPriceRange(dailyPriceRangeService.updateWithExecutionPrice(
-                buyOrder.getStock().getSymbol(), cursor.dailyPriceRange(), externalAsk.price()));
+        return cursor.consumeExternal(executionQuantity, externalAsk.volume());
     }
 
     private MatchCursor matchSellOnce(Order sellOrder, OrderBookResponse orderBook, MatchCursor cursor) {
@@ -253,8 +241,7 @@ public class MatchingEngineTransactionService {
                 // 상대 매수자의 잔고가 부족하다. 제외하고 다음 후보로.
                 return cursor.exclude(internalBuyOrder.getId());
             }
-            return cursor.withDailyPriceRange(dailyPriceRangeService.updateWithExecutionPrice(
-                sellOrder.getStock().getSymbol(), cursor.dailyPriceRange(), executionPrice));
+            return cursor;
         }
 
         Map<Long, Account> lockedAccounts = lockAccountsInIdOrder(sellOrder.getAccount().getId());
@@ -277,10 +264,7 @@ public class MatchingEngineTransactionService {
                 () -> new IllegalArgumentException("보유 수량이 부족합니다."));
         executeExternalSell(sellOrder, sellerAccount, sellerHolding, externalBid.price(), executionQuantity);
 
-        return cursor
-            .consumeExternal(executionQuantity, externalBid.volume())
-            .withDailyPriceRange(dailyPriceRangeService.updateWithExecutionPrice(
-                sellOrder.getStock().getSymbol(), cursor.dailyPriceRange(), externalBid.price()));
+        return cursor.consumeExternal(executionQuantity, externalBid.volume());
     }
 
     private Account requireAccount(Map<Long, Account> lockedAccounts, Order order) {
@@ -317,34 +301,29 @@ public class MatchingEngineTransactionService {
         int externalIndex,
         long consumedAtIndex,
         Set<Long> excludedOrderIds,
-        DailyPriceRangeResponse dailyPriceRange,
         boolean finished
     ) {
 
-        static MatchCursor initial(DailyPriceRangeResponse dailyPriceRange) {
-            return new MatchCursor(0, 0L, Set.of(), dailyPriceRange, false);
+        static MatchCursor initial() {
+            return new MatchCursor(0, 0L, Set.of(), false);
         }
 
         MatchCursor finish() {
-            return new MatchCursor(externalIndex, consumedAtIndex, excludedOrderIds, dailyPriceRange, true);
+            return new MatchCursor(externalIndex, consumedAtIndex, excludedOrderIds, true);
         }
 
         MatchCursor exclude(Long orderId) {
             Set<Long> excluded = new HashSet<>(excludedOrderIds);
             excluded.add(orderId);
-            return new MatchCursor(externalIndex, consumedAtIndex, Set.copyOf(excluded), dailyPriceRange, false);
-        }
-
-        MatchCursor withDailyPriceRange(DailyPriceRangeResponse updated) {
-            return new MatchCursor(externalIndex, consumedAtIndex, excludedOrderIds, updated, false);
+            return new MatchCursor(externalIndex, consumedAtIndex, Set.copyOf(excluded), false);
         }
 
         /** 외부 호가 level을 소비한다. 그 level을 다 쓰면 다음 level로 넘어간다. */
         MatchCursor consumeExternal(long executedQuantity, long levelVolume) {
             long consumed = consumedAtIndex + executedQuantity;
             return consumed >= levelVolume
-                ? new MatchCursor(externalIndex + 1, 0L, excludedOrderIds, dailyPriceRange, false)
-                : new MatchCursor(externalIndex, consumed, excludedOrderIds, dailyPriceRange, false);
+                ? new MatchCursor(externalIndex + 1, 0L, excludedOrderIds, false)
+                : new MatchCursor(externalIndex, consumed, excludedOrderIds, false);
         }
     }
 
@@ -568,38 +547,6 @@ public class MatchingEngineTransactionService {
 
     private BigDecimal limitPrice(Order order) {
         return order.getOrderPrice();
-    }
-
-    private void applyMarketOrderRemainingPrice(Long orderId, DailyPriceRangeResponse dailyPriceRange) {
-        Order order = orderRepository.findByIdForUpdate(orderId).orElse(null);
-        if (order == null
-            || order.getOrderType() != OrderType.MARKET
-            || order.getRemainingQuantity() == 0
-            || !MATCHABLE_STATUSES.contains(order.getStatus())) {
-            return;
-        }
-
-        BigDecimal waitingPrice = order.getOrderSide() == OrderSide.BUY
-            ? dailyHighPrice(dailyPriceRange)
-            : dailyLowPrice(dailyPriceRange);
-
-        if (waitingPrice != null) {
-            order.waitRemainingAt(waitingPrice);
-        }
-    }
-
-    private BigDecimal dailyHighPrice(DailyPriceRangeResponse dailyPriceRange) {
-        if (dailyPriceRange == null) {
-            return null;
-        }
-        return dailyPriceRange.dailyHighPrice();
-    }
-
-    private BigDecimal dailyLowPrice(DailyPriceRangeResponse dailyPriceRange) {
-        if (dailyPriceRange == null) {
-            return null;
-        }
-        return dailyPriceRange.dailyLowPrice();
     }
 
     private List<OrderBookLevel> askLevels(OrderBookResponse orderBook) {

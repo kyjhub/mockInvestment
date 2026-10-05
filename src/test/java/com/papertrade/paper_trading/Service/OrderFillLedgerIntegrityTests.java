@@ -10,7 +10,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookLevel;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
@@ -55,7 +54,6 @@ class OrderFillLedgerIntegrityTests {
     private final OrderRepository orderRepository = mock(OrderRepository.class);
     private final ExecutionRepository executionRepository = mock(ExecutionRepository.class);
     private final HoldingRepository holdingRepository = mock(HoldingRepository.class);
-    private final DailyPriceRangeService dailyPriceRangeService = mock(DailyPriceRangeService.class);
     /** 진짜 posting service를 쓴다. 분개 합계가 0이 아니면 모든 체결 테스트가 바로 깨진다. */
     private final LedgerPostingService ledgerPostingService = new LedgerPostingService(
         savingMock(LedgerTransactionRepository.class),
@@ -77,7 +75,6 @@ class OrderFillLedgerIntegrityTests {
             executionRepository,
             holdingRepository,
             ledgerPostingService,
-            dailyPriceRangeService,
             orderBookService,
             commissionCalculator,
             passThroughTransactionManager()
@@ -91,8 +88,6 @@ class OrderFillLedgerIntegrityTests {
             .thenAnswer(call -> Optional.ofNullable(holdings.get(call.getArgument(0, Long.class))));
         when(holdingRepository.save(any())).thenAnswer(call -> call.getArgument(0));
         when(executionRepository.save(any())).thenAnswer(call -> call.getArgument(0));
-        when(dailyPriceRangeService.updateWithExecutionPrice(anyString(), any(), any()))
-            .thenAnswer(call -> call.getArgument(1));
         // 기본값은 "내부 상대 없음". 필요한 테스트에서만 덮어쓴다.
         when(orderRepository.findMatchableSellOrders(anyCollection(), anyLong(), anyLong(), any(), anyList(), any()))
             .thenReturn(List.of());
@@ -108,7 +103,7 @@ class OrderFillLedgerIntegrityTests {
         Order buyOrder = buyOrder(100L, buyer, "60.0000", 2L);
         givenOrder(buyOrder);
 
-        service.matchOrder(100L, orderBook(ask("60.0000", 1L), ask("60.0000", 1L)), dailyPriceRange());
+        service.matchOrder(100L, orderBook(ask("60.0000", 1L), ask("60.0000", 1L)));
 
         assertThat(buyOrder.getFilledQuantity()).isEqualTo(1L);
         assertThat(buyer.getCashBalance()).isEqualByComparingTo("40.00");
@@ -128,7 +123,7 @@ class OrderFillLedgerIntegrityTests {
         givenOrder(sellOrder);
         givenInternalBuyOrders(internalBuy);
 
-        service.matchOrder(100L, orderBook(), dailyPriceRange());
+        service.matchOrder(100L, orderBook());
 
         assertThat(sellOrder.getFilledQuantity()).isEqualTo(5L);
         assertThat(internalBuy.getFilledQuantity()).isEqualTo(5L);
@@ -148,7 +143,7 @@ class OrderFillLedgerIntegrityTests {
         givenOrder(buyOrder);
         givenInternalSellOrders(phantomSell);
 
-        service.matchOrder(100L, orderBook(ask("55.0000", 2L)), dailyPriceRange());
+        service.matchOrder(100L, orderBook(ask("55.0000", 2L)));
 
         assertThat(buyOrder.getFilledQuantity()).isEqualTo(2L);
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.FILLED);
@@ -161,7 +156,7 @@ class OrderFillLedgerIntegrityTests {
         Order buyOrder = buyOrder(100L, buyer, "60.0000", 1L);
         givenOrder(buyOrder);
 
-        service.matchOrder(100L, orderBook(ask("60.0000", 1L)), dailyPriceRange());
+        service.matchOrder(100L, orderBook(ask("60.0000", 1L)));
 
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.REJECTED);
         assertThat(buyOrder.getCloseReason()).isEqualTo("주문 가능 금액이 부족합니다.");
@@ -174,7 +169,7 @@ class OrderFillLedgerIntegrityTests {
         Order sellOrder = sellOrder(100L, seller, "50.0000", 1L);
         givenOrder(sellOrder);
 
-        service.matchOrder(100L, orderBook(), dailyPriceRange());
+        service.matchOrder(100L, orderBook());
 
         assertThat(sellOrder.getStatus()).isEqualTo(OrderStatus.REJECTED);
         assertThat(sellOrder.getCloseReason()).isEqualTo("보유 수량이 부족합니다.");
@@ -188,7 +183,7 @@ class OrderFillLedgerIntegrityTests {
         Order buyOrder = buyOrder(100L, buyer, "60.0000", 1L);
         givenOrder(buyOrder);
 
-        service.matchOrder(100L, orderBook(), dailyPriceRange());
+        service.matchOrder(100L, orderBook());
 
         assertThat(buyOrder.getStatus()).isEqualTo(OrderStatus.PENDING);
         assertThat(buyOrder.getCloseReason()).isNull();
@@ -302,7 +297,4 @@ class OrderFillLedgerIntegrityTests {
         return new OrderBookResponse(new OrderBookResult(null, "USD", List.of(asks), List.of()), null);
     }
 
-    private DailyPriceRangeResponse dailyPriceRange() {
-        return new DailyPriceRangeResponse(SYMBOL, null, null, null, "USD");
-    }
 }
