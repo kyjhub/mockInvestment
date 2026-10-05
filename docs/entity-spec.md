@@ -282,7 +282,7 @@ Notes:
 - `initialBalance` represents the requested amount for the current trading round.
 - `cashBalance` and `realizedProfit` are caches derived from the ledger: `cash_balance = Σ(CASH entries)`, `realized_profit = −Σ(REALIZED_PNL entries)`. Daily reconciliation verifies them.
 - `totalAssetValue` is refreshed by `TotalAssetValuationScheduler` from cash plus market value. It is not ledger-derived and is not used by any read path yet.
-- Orderable cash is not stored. It is `cash_balance − Σ(reserved_unit_price × remaining_quantity + estimated commission + estimated tax)` over the account's open buy orders (`AWAITING_PRICE`, `PENDING`, `PARTIALLY_FILLED`), computed by `CashReservationCalculator`. Fees are summed per order in Java because fee schedules (minimum commission, tiers) cannot be expressed in SQL.
+- Orderable cash is not stored. It is `cash_balance − Σ(reserved_unit_price × remaining_quantity + fees not yet charged)` over the account's open buy orders (`AWAITING_PRICE`, `PENDING`, `PARTIALLY_FILLED`), computed by `CashReservationCalculator`. "Fees not yet charged" is `round(fee on the order's total amount when fully filled) − charged_commission/charged_tax`, the same rule fills use (see `Order` notes).
 - `AccountOpeningService.open()` creates the account and its `ACCOUNT_OPENING` ledger transaction in one DB transaction. Sign-up does not call it yet.
 - Cumulative performance should be calculated from `AccountFundingRequest` history plus the current account state, scoped after the latest `AccountReset.resetAt` when a reset exists. Do not use `LeaderboardRanking` as the source of truth.
 
@@ -453,6 +453,9 @@ Columns:
 | `orderQuantity` | `order_quantity` | `Long` | Ordered quantity | not null |
 | `filledQuantity` | `filled_quantity` | `Long` | Filled quantity | not null, default 0 |
 | `remainingQuantity` | `remaining_quantity` | `Long` | Remaining quantity | not null |
+| `filledAmount` | `filled_amount` | `BigDecimal` | Σ(execution price × quantity), unrounded. Base for per-order fees | numeric(19,4), not null, default 0 |
+| `chargedCommission` | `charged_commission` | `BigDecimal` | Commission charged to this order so far | numeric(19,2), not null, default 0 |
+| `chargedTax` | `charged_tax` | `BigDecimal` | Tax charged to this order so far | numeric(19,2), not null, default 0 |
 | `status` | `status` | `OrderStatus` | Order status | enum string, not null |
 | `submittedAt` | `submitted_at` | `LocalDateTime` | Submitted timestamp | not null, creation timestamp |
 | `canceledAt` | `canceled_at` | `LocalDateTime` | Canceled timestamp | nullable |
@@ -480,6 +483,7 @@ Notes:
 - Limit prices must be within current price ±50% (`order.price-band.margin`).
 - `reservedUnitPrice` equals `orderPrice` for buys, `null` for sells and for market orders still awaiting a price.
 - `clientOrderId` is optional but recommended. When supplied, it is used for idempotent order submission per account.
+- Fees are charged per order on the cumulative trade amount, so the same amount costs the same fee whether filled at once or in parts: `this fill's fee = round_half_up(filled_amount_after × rate) − charged_so_far`. `Order.fill(quantity, tradeAmount, commission, tax)` updates the quantities and these three columns together.
 - `Order.reject(reason)` closes an order as `REJECTED`, or as `CANCELED` when it already has fills (`REJECTED` means the acceptance itself was invalid, which contradicts a partial fill). `closeReason` and `filledQuantity` are preserved either way.
 - Index `idx_orders_account_side_status (account_id, order_side, status)` supports aggregating reserved cash on every order acceptance.
 
@@ -513,7 +517,7 @@ Relations:
 Notes:
 
 - An internal fill creates two `Execution` rows (buy side and sell side) that share one `tradeId` and one `LedgerTransaction`. An external fill creates one.
-- `commission` and `tax` are denormalized copies for the execution history screen. Balances and profit are always based on the `FEE`/`TAX` ledger entries. Daily reconciliation compares their totals.
+- `commission` and `tax` hold the fee charged by this fill under the per-order cumulative rule; their sum per order equals `orders.charged_commission` / `charged_tax`. They are denormalized copies for the execution history screen. Balances and profit are always based on the `FEE`/`TAX` ledger entries. Daily reconciliation compares their totals.
 
 ## `Holding`
 
@@ -805,7 +809,7 @@ Inside one fill transaction:
 2. Lock participating accounts in ascending id order (at most 2).
 3. Read holdings only for accounts already locked.
 4. Cap the quantity by the seller's holding and the buyer's affordable quantity — the largest quantity whose
-   price × quantity + commission + tax still fits in the buyer's cash (binary search; fee schedules may be non-linear).
+   price × quantity + this fill's fees still fits in the buyer's cash (binary search; fees are per-order cumulative and rounded to cents, so a closed form is off by one at rounding edges).
    A cap of 0 is not an exception: it rejects the order (account problem) or skips the counterparty.
 5. Update holdings, account cash, realized profit, and order quantities/status.
 6. Post one ledger transaction (TRADE, FILL:{tradeId}) through LedgerPostingService.
@@ -1372,7 +1376,8 @@ Main classes:
 - `MatchingEngineTransactionService`: performs matching, one DB transaction per fill (see Transactional Order Execution Rule).
 - `LedgerPostingService`: the only path for writing ledger entries.
 - `CommissionCalculator`: strategy interface for execution commission and tax calculation.
-- `ZeroCommissionCalculator`: current default strategy; returns zero commission and zero tax.
+- `RateCommissionCalculator`: default strategy; trade amount × `order.fee.commission-rate` / `order.fee.tax-rate` (both 0 in operation).
+- `TradingFees`: rounding and the per-order cumulative rule; used by fills, the fill-time cash cap, and reservations.
 - `OrderRepository`: includes pessimistic-lock reads and DB-based pending order matching queries.
 - `AccountRepository`: includes account pessimistic-lock reads.
 
@@ -1632,6 +1637,9 @@ erDiagram
         BIGINT order_quantity "NOT NULL"
         BIGINT filled_quantity "NOT NULL"
         BIGINT remaining_quantity "NOT NULL"
+        DECIMAL filled_amount "NOT NULL"
+        DECIMAL charged_commission "NOT NULL"
+        DECIMAL charged_tax "NOT NULL"
         VARCHAR status "ENUM NOT NULL"
         TIMESTAMP submitted_at "NOT NULL"
         TIMESTAMP canceled_at

@@ -60,7 +60,7 @@ class OrderFillLedgerIntegrityTests {
         savingMock(LedgerEntryRepository.class)
     );
     private final OrderBookService orderBookService = mock(OrderBookService.class);
-    private CommissionCalculator commissionCalculator = new ZeroCommissionCalculator();
+    private CommissionCalculator commissionCalculator = RateCommissionCalculator.free();
 
     private final Map<Long, Account> accounts = new HashMap<>();
     private final Map<Long, Holding> holdings = new HashMap<>();
@@ -184,7 +184,7 @@ class OrderFillLedgerIntegrityTests {
     void buyIsCappedSoThatTheFeeStillFitsInTheCash() {
         // 1% 수수료. 10주는 1,000 + 10 = 1,010이라 예수금 1,000을 넘는다. 체결대금만으로 캡을 씌우면
         // cash_balance >= 0 제약에 걸려 체결 트랜잭션이 통째로 실패하고 매번 같은 자리에서 실패한다.
-        chargeFees("0.01", "0");
+        chargeFees("0.01");
         Account buyer = account(1L, "1000.00");
         Order buyOrder = buyOrder(100L, buyer, "100.0000", 20L);
         givenOrder(buyOrder);
@@ -198,7 +198,7 @@ class OrderFillLedgerIntegrityTests {
 
     @Test
     void buyThatCoversThePriceButNotTheFeeIsRejected() {
-        chargeFees("0.01", "0");
+        chargeFees("0.01");
         Account buyer = account(1L, "100.00");
         Order buyOrder = buyOrder(100L, buyer, "100.0000", 1L);
         givenOrder(buyOrder);
@@ -212,7 +212,7 @@ class OrderFillLedgerIntegrityTests {
 
     @Test
     void internalBuyerIsCappedByFeesAndTheSellerPaysFeesFromTheProceeds() {
-        chargeFees("0.01", "0");
+        chargeFees("0.01");
         Account seller = account(1L, "0.00");
         Account buyer = account(2L, "1000.00");
         holding(seller, 20L, "50.0000");
@@ -230,18 +230,25 @@ class OrderFillLedgerIntegrityTests {
     }
 
     @Test
-    void capHandlesNonLinearFeesSuchAsAMinimumCommission() {
-        // 최소 수수료 5. 수량으로 식을 역산할 수 없는 수수료 체계다.
-        // 10주 = 1,000 + 5 > 1,000, 9주 = 900 + 5 ≤ 1,000
-        chargeFees("0.001", "5.00");
-        Account buyer = account(1L, "1000.00");
-        Order buyOrder = buyOrder(100L, buyer, "100.0000", 10L);
-        givenOrder(buyOrder);
+    void sameTradeAmountCostsTheSameFeeWhetherFilledAtOnceOrInParts() {
+        // 시중 증권사처럼 수수료는 체결금액에만 의존해야 한다. 0.25%면 30달러는 0.075 → 0.08이다.
+        // 체결 건마다 반올림하면 10달러씩 세 번은 0.025 → 0.03 × 3 = 0.09가 되어 달라진다.
+        chargeFees("0.0025");
+        Account atOnce = account(1L, "100.00");
+        Order wholeOrder = buyOrder(100L, atOnce, "10.0000", 3L);
+        givenOrder(wholeOrder);
+        service.matchOrder(100L, orderBook(ask("10.0000", 3L)));
 
-        service.matchOrder(100L, orderBook(ask("100.0000", 10L)));
+        Account inParts = account(2L, "100.00");
+        Order splitOrder = buyOrder(200L, inParts, "10.0000", 3L);
+        givenOrder(splitOrder);
+        service.matchOrder(200L, orderBook(ask("10.0000", 1L), ask("10.0000", 1L), ask("10.0000", 1L)));
 
-        assertThat(buyOrder.getFilledQuantity()).isEqualTo(9L);
-        assertThat(buyer.getCashBalance()).isEqualByComparingTo("95.00");
+        assertThat(wholeOrder.getChargedCommission()).isEqualByComparingTo("0.08");
+        assertThat(splitOrder.getChargedCommission()).isEqualByComparingTo("0.08");
+        // 100 − 30 − 0.08
+        assertThat(atOnce.getCashBalance()).isEqualByComparingTo("69.92");
+        assertThat(inParts.getCashBalance()).isEqualByComparingTo("69.92");
     }
 
     private MatchingEngineTransactionService newService() {
@@ -252,29 +259,14 @@ class OrderFillLedgerIntegrityTests {
             holdingRepository,
             ledgerPostingService,
             orderBookService,
-            commissionCalculator,
+            new TradingFees(commissionCalculator),
             passThroughTransactionManager()
         );
     }
 
     /** 운영은 수수료 0이지만 체결 경로는 수수료가 있다고 가정하고 동작해야 한다. */
-    private void chargeFees(String commissionRate, String minimumCommission) {
-        BigDecimal rate = new BigDecimal(commissionRate);
-        BigDecimal minimum = new BigDecimal(minimumCommission);
-        commissionCalculator = new CommissionCalculator() {
-            @Override
-            public BigDecimal calculateCommission(BigDecimal price, Long quantity) {
-                if (quantity == 0) {
-                    return BigDecimal.ZERO;
-                }
-                return price.multiply(BigDecimal.valueOf(quantity)).multiply(rate).max(minimum);
-            }
-
-            @Override
-            public BigDecimal calculateTax(BigDecimal price, Long quantity) {
-                return BigDecimal.ZERO;
-            }
-        };
+    private void chargeFees(String commissionRate) {
+        commissionCalculator = new RateCommissionCalculator(new BigDecimal(commissionRate), BigDecimal.ZERO);
         service = newService();
     }
 

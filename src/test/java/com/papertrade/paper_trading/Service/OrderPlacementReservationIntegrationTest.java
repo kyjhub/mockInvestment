@@ -129,7 +129,7 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
         // 잔고 화면의 평가용 시세. 이 class는 평가를 검증하지 않으므로 비워 둔다.
         when(priceService.getPrices(anyList())).thenReturn(new PriceResponse(List.of()));
         givenCommissionRate("0");
-        when(commissionCalculator.calculateTax(any(), any())).thenReturn(BigDecimal.ZERO);
+        when(commissionCalculator.tax(any())).thenReturn(BigDecimal.ZERO);
     }
 
     @Test
@@ -405,7 +405,7 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
         assertThat(accountQueryService.getBalance(user).reservedCash()).isEqualByComparingTo("1000000.00");
 
         Order order = orderRepository.findById(accepted.orderId()).orElseThrow();
-        order.fill(6L);
+        order.fill(6L, new BigDecimal("600000.0000"), BigDecimal.ZERO, BigDecimal.ZERO);
         orderRepository.saveAndFlush(order);
 
         // 잔여 4주만 묶여 있어야 한다. 구속액을 줄이는 별도 코드는 없다.
@@ -433,10 +433,8 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     private void givenCommissionRate(String rate) {
         BigDecimal commissionRate = new BigDecimal(rate);
         // doAnswer 형태여야 한다. when(...)으로 다시 스텁하면 이전 answer가 null 인자로 한 번 실행된다.
-        doAnswer(call -> call.<BigDecimal>getArgument(0)
-            .multiply(BigDecimal.valueOf(call.<Long>getArgument(1)))
-            .multiply(commissionRate))
-            .when(commissionCalculator).calculateCommission(any(), any());
+        doAnswer(call -> call.<BigDecimal>getArgument(0).multiply(commissionRate))
+            .when(commissionCalculator).commission(any());
     }
 
     private void givenCurrentPrice(String price) {

@@ -262,6 +262,7 @@ PostgreSQL datasource가 없으면 `contextLoads()`가 실패합니다. 나머�
 | `price.cache.ttl-seconds` | 30 | 현재가 캐시 TTL. 주문 접수가 허용하는 현재가의 나이 |
 | `order.market-price.margin` | 0.1 | 시장가를 지정가로 바꿀 때 현재가에 더하고 빼는 비율 |
 | `order.price-band.margin` | 0.5 | 지정가 주문가격이 현재가에서 벗어날 수 있는 비율 |
+| `order.fee.commission-rate` / `order.fee.tax-rate` | 0 / 0 | 체결금액에 매기는 수수료·세금 요율. 주문 단위 누적 체결금액에 매기고 센트에서 반올림 |
 | `market-calendar.cache.ttl-hours` | 12 | 장 운영정보 캐시 TTL |
 | `matching-engine.lock.ttl-ms` | 15000 | 종목 매칭 락 TTL |
 | `matching-engine.rematch.fixed-delay-ms` | 30000 | 안전망 재매칭 주기 |

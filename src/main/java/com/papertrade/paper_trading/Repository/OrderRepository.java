@@ -113,17 +113,17 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     );
 
     /**
-     * 미체결 매수 주문의 구속 단가와 잔량. 구속액 계산은 {@code CashReservationCalculator}가 한다.
+     * 미체결 매수 주문의 구속 단가·잔량과 수수료 누적값. 구속액 계산은 {@code CashReservationCalculator}가 한다.
      *
      * <p>SQL로 {@code sum(reserved_unit_price * remaining_quantity)}를 바로 내지 않는 이유는 수수료다.
-     * 수수료 체계(정률, 최소 수수료, 구간제)는 SQL로 표현할 수 없어서, 주문별로 읽어 계산기로 더한다.
+     * 수수료는 주문의 누적 체결금액에 매기고 센트에서 반올림하므로({@code TradingFees}), 주문별로 읽어 같은 규칙으로 더한다.
      *
      * <p>구속액을 컬럼으로 저장하지 않고 여기서 파생하므로 해제 경로라는 것이 존재하지 않는다 — 체결되면
      * remainingQuantity가 줄고 취소·거절·실효되면 status가 빠지면서 합계에서 자동으로 사라진다.
      */
     @Query("""
         select new com.papertrade.paper_trading.Repository.OrderRepository$CashReservation(
-            o.reservedUnitPrice, o.remainingQuantity)
+            o.reservedUnitPrice, o.remainingQuantity, o.filledAmount, o.chargedCommission, o.chargedTax)
         from Order o
         where o.account.id = :accountId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
@@ -190,7 +190,14 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     record AwaitingPriceOrder(Long id, String symbol) {
     }
 
-    record CashReservation(BigDecimal unitPrice, Long quantity) {
+    /** 미체결 매수 주문 한 건의 구속 단가·잔량과, 남은 수수료를 구하는 데 필요한 누적값. */
+    record CashReservation(
+        BigDecimal unitPrice,
+        Long remainingQuantity,
+        BigDecimal filledAmount,
+        BigDecimal chargedCommission,
+        BigDecimal chargedTax
+    ) {
     }
 
 }

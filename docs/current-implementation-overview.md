@@ -928,12 +928,23 @@ realizedProfit += executionAmount - costBasis
 
 ### 13.8 수수료와 세금
 
-`CommissionCalculator` 전략 interface가 있으며 현재 구현체는 `ZeroCommissionCalculator`다.
+시중 증권사처럼 **체결금액에 요율을 곱한다.** 운영 요율은 수수료·세금 모두 0이고(`order.fee.commission-rate`, `order.fee.tax-rate`), 체결·구속·잔고 캡은 수수료가 있다고 가정하고 동작한다. 수수료를 도입할 때는 설정만 바꾸면 된다.
 
-- 수수료: 0
-- 세금: 0
+| 구성 | 역할 |
+| --- | --- |
+| `CommissionCalculator` | 체결금액 → 수수료·세금(반올림 전). 전략 interface |
+| `RateCommissionCalculator` | 기본 구현. 체결금액 × 요율 |
+| `TradingFees` | 반올림과 부분 체결 규칙. 체결, 체결 시점 잔고 캡, 구속액이 모두 이것을 쓴다 |
 
-체결 row에는 계산 결과를 기록한다. 실제 수수료 정책이 결정되면 전략 구현체를 교체할 수 있도록 매칭 엔진과 분리되어 있다.
+**같은 체결금액이면 같은 수수료다.** 체결 건마다 수수료를 매기고 그때마다 센트로 반올림하면 30달러를 한 번에 체결할 때(0.25% → 0.075 → 0.08)와 10달러씩 세 번 체결할 때(0.025 → 0.03, 합 0.09)가 달라진다. 그래서 주문의 누적 체결금액에 대한 수수료를 구하고, 이미 부과한 만큼을 뺀 차액을 이번 체결에 매긴다.
+
+```text
+이번 체결 수수료 = 반올림(누적 체결금액 × 요율) − 이 주문에 이미 부과한 수수료
+```
+
+주문 전체의 수수료는 분할 방식과 무관하게 `반올림(총 체결금액 × 요율)`이 된다. 센트 미만은 반올림(HALF_UP)한다. 누적값은 `orders.filled_amount`(체결가 × 수량을 반올림 없이 합산), `orders.charged_commission`, `orders.charged_tax`에 두고 `Order.fill()`이 체결마다 갱신한다. 주문 row는 체결 중 잠겨 있으므로 동시성 문제가 없다.
+
+체결 row의 `commission`/`tax`에는 그 체결에 부과한 차액을 기록한다. 같은 주문의 `executions.commission` 합은 `orders.charged_commission`과 같다.
 
 ### 13.9 체결 불가 주문의 거절
 
@@ -994,9 +1005,9 @@ realizedProfit += executionAmount - costBasis
 
 대신 미체결 주문에서 매번 집계한다. 현금은 `CashReservationCalculator`, 수량은 `OrderRepository.sumReservedQuantity()`가 맡는다. **해제 경로라는 것이 존재하지 않는다** — 체결되면 `remaining_quantity`가 줄고, 취소·거절·실효되면 `status`가 빠지면서 합계에서 자동으로 사라진다. 부분 체결도 자동 반영된다. 드리프트가 개념적으로 발생할 수 없다.
 
-**주문 한 건의 구속액은 `체결대금 + 수수료 + 세금` 예상액이다.** 체결대금만 묶으면 이미 걸린 주문들의 수수료만큼 예수금을 넘는 주문이 접수된다. 수수료 체계(정률, 최소 수수료, 구간제)는 SQL로 표현할 수 없으므로, `OrderRepository.findCashReservations()`로 미체결 매수 주문의 구속 단가와 잔량을 읽어 계산기로 더한다. 계좌당 미체결 주문은 당일 실효(§11.5) 덕분에 하루치로 제한되어 비용이 작다. 주문 접수, 접수 검증 대기 확정, 잔고 화면이 모두 같은 계산기를 쓴다.
+**주문 한 건의 구속액은 `남은 수량의 체결대금 + 앞으로 더 매길 수수료·세금`이다.** 체결대금만 묶으면 이미 걸린 주문들의 수수료만큼 예수금을 넘는 주문이 접수된다. 수수료는 체결과 같은 규칙(§13.8)으로 계산한다 — 부분 체결된 주문은 `반올림(다 체결됐을 때의 누적 금액 × 요율) − 이미 부과한 수수료`만 묶는다. 이 규칙은 SQL로 표현하기 어려우므로 `OrderRepository.findCashReservations()`로 구속 단가, 잔량, 누적값을 읽어 Java에서 더한다. 계좌당 미체결 주문은 당일 실효(§11.5) 덕분에 하루치로 제한되어 비용이 작다. 주문 접수, 접수 검증 대기 확정, 잔고 화면이 모두 같은 계산기를 쓴다.
 
-접수 시점의 예상액이라 체결 시점 실제 차감액과 다를 수 있다. 부분 체결마다 최소 수수료가 붙거나 그사이 요율이 바뀌는 경우다. 그래서 체결 시점 잔고 캡(§19.4)을 최종 방어선으로 남긴다 — 접수 검증은 사용자에게 정확한 주문가능금액을, 체결 캡은 원장이 깨지지 않음을 보장한다.
+지정가 이하로만 체결되고 수수료가 주문 단위로 매겨지므로 실제 차감액은 구속액을 넘지 않는다. 그래도 접수와 체결 사이에 요율이 바뀔 수 있으므로 체결 시점 잔고 캡(§19.4)을 최종 방어선으로 남긴다 — 접수 검증은 사용자에게 정확한 주문가능금액을, 체결 캡은 원장이 깨지지 않음을 보장한다.
 
 집계 비용을 위해 `orders(account_id, order_side, status)` index를 둔다.
 
@@ -1235,9 +1246,9 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `SymbolMatchingProcessorTests` | 4 | 단위 | 종목 lock, 결과 분류, 예외 전파, 단일 sweep |
 | `MatchingEngineStreamConsumerTests` | 3 | 단위 | 구형 호가 이벤트 이관, lock busy PEL 유지, quota ACK |
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
-| `OrderFillLedgerIntegrityTests` | 10 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정, 수수료를 포함한 잔고 캡(정률·최소 수수료, 내부 체결 매도자 수수료) |
+| `OrderFillLedgerIntegrityTests` | 10 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정, 수수료를 포함한 잔고 캡, 내부 체결 매도자 수수료, 한 번 체결과 분할 체결의 수수료 동일성 |
 | `OrderPlacementReservationIntegrationTest` | 20 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가의 지정가 변환(±10%), 현재가 밴드, 매도가능수량, 접수 검증 대기와 그 확정·거절·취소, 미체결 주문 수수료의 구속 |
-| `CashReservationCalculatorTests` | 5 | 단위 | 구속액에 미체결 주문별 수수료 포함, 최소 수수료의 주문별 적용, 새 주문과 같은 규칙 |
+| `CashReservationCalculatorTests` | 5 | 단위 | 구속액에 미체결 주문별 수수료 포함, 부분 체결 주문은 아직 부과하지 않은 수수료만 구속, 새 주문과 같은 규칙 |
 | `PriceServiceOrderPriceTests` | 5 | 단위 | 주문용 현재가의 캐시 우선, 일봉 예산 사용, 예산·공급자 실패를 예외 없이 "모름"으로 |
 | `AwaitingPriceOrderSchedulerTests` | 3 | 단위 | 종목당 1회 조회, 가격 없는 주문 대기 유지, 실패 격리 |
 | `MarketPriceLookupTests` | 3 | 단위 | 200개씩 나눠 조회, 예산 소진 시 받은 시세 유지 |
@@ -1387,16 +1398,18 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 19.4 수수료 전략 확장 시 현금 반영
 
-현재 수수료와 세금은 항상 0이다(`ZeroCommissionCalculator`). 0이 아닌 계산기로 바꿨을 때 이미 동작하는 것과 아직 아닌 것이 있다.
+운영 요율은 0이다. 요율을 0이 아니게 바꿨을 때 동작하는 경로는 다음과 같다.
 
 | 경로 | 상태 |
 | --- | --- |
 | 체결 시 현금 차감과 `FEE`/`TAX` 분개 | 동작한다. `addFeePostings()`가 계좌 현금을 차감하고 비용 분개를 같은 원장 거래에 붙인다. 0이면 분개를 만들지 않는다 |
 | `executions.commission`/`tax` | 표시용 사본으로 저장된다. 대사 7·8번이 합계를 검증한다 |
 | 접수 시 구속액 | 동작한다. 새 주문과 이미 걸린 미체결 매수 주문 모두 `체결대금 + 수수료 + 세금` 예상액으로 묶는다(`CashReservationCalculator`, §13.11) |
-| 체결 시 잔고 캡 | 동작한다. `affordableQuantity()`가 `체결대금 + 수수료 + 세금 ≤ 예수금`인 최대 수량을 구한다. 수수료 체계(정률, 최소 수수료, 구간제)마다 식이 달라 역산하지 않고, 수수료 없이 살 수 있는 수량을 상한으로 이분 탐색한다. 전제는 수량이 늘면 총비용이 줄지 않는다는 것 하나다. 수수료가 0이면 상한에서 바로 끝난다. 매도자는 받은 체결대금에서 수수료를 내므로 캡이 없다 |
+| 체결 시 잔고 캡 | 동작한다. `affordableQuantity()`가 `체결대금 + 이번 체결 수수료·세금 ≤ 예수금`인 최대 수량을 구한다. 수수료가 주문 누적 금액 기준이고 센트에서 반올림되므로 식으로 역산하면 경계에서 1주씩 어긋난다. 그래서 수수료 없이 살 수 있는 수량을 상한으로 이분 탐색한다(수량이 늘면 총비용이 줄지 않으므로 성립). 수수료가 0이면 상한에서 바로 끝난다. 매도자는 받은 체결대금에서 수수료를 내므로 캡이 없다 |
 
-접수와 체결 모두 수수료가 있다고 가정하고 동작하므로, 운영에서는 0으로 두더라도 `CommissionCalculator` 구현체만 바꾸면 수수료를 도입할 수 있다. 두 검사는 역할이 다르다. 접수 시점 예상액은 부분 체결마다 붙는 최소 수수료나 요율 변경 때문에 실제 차감액보다 작을 수 있으므로, 체결 시 잔고 캡이 최종 방어선이다.
+접수와 체결 모두 수수료가 있다고 가정하고 동작하므로, 수수료를 도입할 때는 `order.fee.commission-rate`/`tax-rate`만 바꾸면 된다. 두 검사는 역할이 다르다. 구속액은 같은 규칙으로 계산해 실제 차감액 이상이지만, 접수와 체결 사이에 요율이 바뀌면 달라질 수 있으므로 체결 시 잔고 캡이 최종 방어선이다.
+
+세금은 지금 매수·매도 양쪽에 같은 요율로 매긴다. 매도에만 붙는 세금(예: 국내 거래세, 미국 SEC fee)을 도입하려면 `CommissionCalculator`에 매수·매도 구분을 넘겨야 한다.
 
 ### 19.5 Redis와 DB 사이의 원자성
 
@@ -1416,4 +1429,4 @@ Redis 슬롯 lock은 계정의 동시 WebSocket 연결 수를 2개로 제한하�
 
 `application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `SPRING_JPA_DDL_AUTO=update`와 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
 
-다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.close_reason`(§13.9), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. `close_reason`은 `reject_reason`을 이름만 바꾼 것이고(§11.5), `order_status` 값에 `EXPIRED`와 `AWAITING_PRICE`(§11.2)가 추가되었다. Hibernate가 enum 컬럼에 만든 `CHECK` 제약이 있다면 새 값을 허용하도록 바꿔야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
+다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.close_reason`(§13.9), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11), 주문 단위 수수료용 `orders.filled_amount`·`charged_commission`·`charged_tax`(§13.8, DB 기본값 0)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. `close_reason`은 `reject_reason`을 이름만 바꾼 것이고(§11.5), `order_status` 값에 `EXPIRED`와 `AWAITING_PRICE`(§11.2)가 추가되었다. Hibernate가 enum 컬럼에 만든 `CHECK` 제약이 있다면 새 값을 허용하도록 바꿔야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.

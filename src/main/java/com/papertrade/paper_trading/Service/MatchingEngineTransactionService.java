@@ -19,6 +19,7 @@ import com.papertrade.paper_trading.Repository.OrderRepository.MatchableOrder;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import com.papertrade.paper_trading.Service.LedgerPostingService.Posting;
+import com.papertrade.paper_trading.Service.TradingFees.Fees;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -56,7 +57,7 @@ public class MatchingEngineTransactionService {
     private final HoldingRepository holdingRepository;
     private final LedgerPostingService ledgerPostingService;
     private final OrderBookService orderBookService;
-    private final CommissionCalculator commissionCalculator;
+    private final TradingFees tradingFees;
     private final PlatformTransactionManager transactionManager;
 
     public void matchSymbol(String symbol) {
@@ -160,7 +161,7 @@ public class MatchingEngineTransactionService {
                 buyOrder.getAccount().getId(), internalSellOrder.getAccount().getId());
             Account buyerAccount = requireAccount(lockedAccounts, buyOrder);
 
-            long affordableQuantity = affordableQuantity(buyerAccount, executionPrice);
+            long affordableQuantity = affordableQuantity(buyerAccount, buyOrder, executionPrice);
             if (affordableQuantity <= 0) {
                 // 가장 싼 후보를 1주도 못 산다. 이후 후보는 가격이 비감소라 마찬가지다.
                 buyOrder.reject("주문 가능 금액이 부족합니다.");
@@ -181,7 +182,7 @@ public class MatchingEngineTransactionService {
 
         Map<Long, Account> lockedAccounts = lockAccountsInIdOrder(buyOrder.getAccount().getId());
         Account buyerAccount = requireAccount(lockedAccounts, buyOrder);
-        long affordableQuantity = affordableQuantity(buyerAccount, externalAsk.price());
+        long affordableQuantity = affordableQuantity(buyerAccount, buyOrder, externalAsk.price());
         if (affordableQuantity <= 0) {
             buyOrder.reject("주문 가능 금액이 부족합니다.");
             return cursor.finish();
@@ -352,7 +353,7 @@ public class MatchingEngineTransactionService {
 
         long executionQuantity = Math.min(
             requestedQuantity,
-            Math.min(sellerHolding.getQuantity(), affordableQuantity(buyerAccount, executionPrice))
+            Math.min(sellerHolding.getQuantity(), affordableQuantity(buyerAccount, buyOrder, executionPrice))
         );
         if (executionQuantity <= 0) {
             return 0L;
@@ -364,15 +365,19 @@ public class MatchingEngineTransactionService {
             buyOrder.getStock().getId()
         ).orElseGet(() -> holdingRepository.save(Holding.create(buyerAccount, buyOrder.getStock())));
 
-        BigDecimal executionAmount = money(executionPrice.multiply(BigDecimal.valueOf(executionQuantity)));
+        BigDecimal tradeAmount = tradeAmount(executionPrice, executionQuantity);
+        BigDecimal executionAmount = money(tradeAmount);
+        // 수수료는 주문의 누적값으로 계산하므로 fill()로 누적값을 바꾸기 전에 구한다.
+        Fees buyerFees = tradingFees.nextFill(buyOrder, tradeAmount);
+        Fees sellerFees = tradingFees.nextFill(sellOrder, tradeAmount);
         BigDecimal costBasis = sellerHolding.sell(executionQuantity);
         BigDecimal realizedProfit = executionAmount.subtract(costBasis);
         buyerAccount.debitCash(executionAmount);
         sellerAccount.creditCash(executionAmount);
         sellerAccount.addRealizedProfit(realizedProfit);
         buyerHolding.buy(executionQuantity, executionPrice);
-        buyOrder.fill(executionQuantity);
-        sellOrder.fill(executionQuantity);
+        buyOrder.fill(executionQuantity, tradeAmount, buyerFees.commission(), buyerFees.tax());
+        sellOrder.fill(executionQuantity, tradeAmount, sellerFees.commission(), sellerFees.tax());
 
         // 분개는 엔티티를 모두 갱신한 뒤에 만든다. balanceAfter가 갱신 후 값이어야 하기 때문이다.
         List<Posting> postings = new ArrayList<>();
@@ -384,8 +389,6 @@ public class MatchingEngineTransactionService {
             -executionQuantity, sellerHolding.getTotalPurchaseAmount()));
         postings.add(Posting.of(sellerAccount, LedgerAccount.REALIZED_PNL, realizedProfit.negate()));
 
-        Fees buyerFees = fees(executionPrice, executionQuantity);
-        Fees sellerFees = fees(executionPrice, executionQuantity);
         addFeePostings(postings, buyerAccount, buyerFees);
         addFeePostings(postings, sellerAccount, sellerFees);
 
@@ -409,11 +412,11 @@ public class MatchingEngineTransactionService {
      * <p>체결대금만으로 수량을 정하면 수수료가 0이 아닐 때 현금이 모자란다. 그러면 {@code cash_balance >= 0}
      * 제약에 걸려 체결 트랜잭션이 통째로 실패하고, 같은 주문이 매번 같은 자리에서 실패한다.
      *
-     * <p>수수료 체계는 계산기마다 다르다(정률, 최소 수수료, 구간제). 그래서 수량을 식으로 역산하지 않고,
-     * 수수료 없이 살 수 있는 수량을 상한으로 두고 이분 탐색한다. 전제는 하나다 — 수량이 늘면 총비용이
-     * 줄지 않는다. 수수료가 0이면 상한에서 바로 끝난다.
+     * <p>수수료는 이 주문의 누적 체결금액으로 매기고 센트에서 반올림하므로({@link TradingFees}) 수량을 식으로
+     * 역산하면 반올림 경계에서 1주씩 어긋난다. 그래서 수수료 없이 살 수 있는 수량을 상한으로 두고 이분
+     * 탐색한다. 수량이 늘면 총비용이 줄지 않으므로 성립한다. 수수료가 0이면 상한에서 바로 끝난다.
      */
-    private long affordableQuantity(Account account, BigDecimal executionPrice) {
+    private long affordableQuantity(Account account, Order buyOrder, BigDecimal executionPrice) {
         if (executionPrice == null || executionPrice.signum() <= 0) {
             return 0L;
         }
@@ -422,7 +425,7 @@ public class MatchingEngineTransactionService {
         if (upperBound <= 0) {
             return 0L;
         }
-        if (purchaseCost(executionPrice, upperBound).compareTo(cash) <= 0) {
+        if (purchaseCost(buyOrder, executionPrice, upperBound).compareTo(cash) <= 0) {
             return upperBound;
         }
 
@@ -430,7 +433,7 @@ public class MatchingEngineTransactionService {
         long unaffordable = upperBound;
         while (unaffordable - affordable > 1) {
             long candidate = affordable + (unaffordable - affordable) / 2;
-            if (purchaseCost(executionPrice, candidate).compareTo(cash) <= 0) {
+            if (purchaseCost(buyOrder, executionPrice, candidate).compareTo(cash) <= 0) {
                 affordable = candidate;
             } else {
                 unaffordable = candidate;
@@ -439,9 +442,15 @@ public class MatchingEngineTransactionService {
         return affordable;
     }
 
-    /** 매수로 실제로 빠져나가는 현금. 체결대금과 수수료·세금을 체결 경로와 같은 반올림으로 더한다. */
-    private BigDecimal purchaseCost(BigDecimal executionPrice, long quantity) {
-        return money(executionPrice.multiply(BigDecimal.valueOf(quantity))).add(fees(executionPrice, quantity).total());
+    /** 이 주문이 이 수량을 더 사면 실제로 빠져나가는 현금. 체결 경로와 같은 규칙으로 계산한다. */
+    private BigDecimal purchaseCost(Order buyOrder, BigDecimal executionPrice, long quantity) {
+        BigDecimal tradeAmount = tradeAmount(executionPrice, quantity);
+        return money(tradeAmount).add(tradingFees.nextFill(buyOrder, tradeAmount).total());
+    }
+
+    /** 체결가 × 수량. 반올림하지 않는다 — 수수료의 기준이 되는 금액이다. */
+    private BigDecimal tradeAmount(BigDecimal executionPrice, long quantity) {
+        return executionPrice.multiply(BigDecimal.valueOf(quantity));
     }
 
     private void executeExternalBuy(
@@ -451,8 +460,9 @@ public class MatchingEngineTransactionService {
         BigDecimal executionPrice,
         Long executionQuantity
     ) {
-        BigDecimal executionAmount = money(executionPrice.multiply(BigDecimal.valueOf(executionQuantity)));
-        Fees buyerFees = fees(executionPrice, executionQuantity);
+        BigDecimal tradeAmount = tradeAmount(executionPrice, executionQuantity);
+        BigDecimal executionAmount = money(tradeAmount);
+        Fees buyerFees = tradingFees.nextFill(buyOrder, tradeAmount);
         // 호출자가 affordableQuantity()로 이미 캡을 씌우므로 도달할 수 없다.
         // 남겨두는 이유는 거절 조건이어서가 아니라, 캡 계산이 깨졌다는 신호이기 때문이다.
         if (buyerAccount.getCashBalance().compareTo(executionAmount.add(buyerFees.total())) < 0) {
@@ -461,7 +471,7 @@ public class MatchingEngineTransactionService {
 
         buyerAccount.debitCash(executionAmount);
         buyerHolding.buy(executionQuantity, executionPrice);
-        buyOrder.fill(executionQuantity);
+        buyOrder.fill(executionQuantity, tradeAmount, buyerFees.commission(), buyerFees.tax());
 
         List<Posting> postings = new ArrayList<>();
         postings.add(Posting.cash(buyerAccount, executionAmount.negate()));
@@ -487,13 +497,15 @@ public class MatchingEngineTransactionService {
         BigDecimal executionPrice,
         Long executionQuantity
     ) {
-        BigDecimal executionAmount = money(executionPrice.multiply(BigDecimal.valueOf(executionQuantity)));
+        BigDecimal tradeAmount = tradeAmount(executionPrice, executionQuantity);
+        BigDecimal executionAmount = money(tradeAmount);
+        Fees sellerFees = tradingFees.nextFill(sellOrder, tradeAmount);
         BigDecimal costBasis = sellerHolding.sell(executionQuantity);
         BigDecimal realizedProfit = executionAmount.subtract(costBasis);
 
         sellerAccount.creditCash(executionAmount);
         sellerAccount.addRealizedProfit(realizedProfit);
-        sellOrder.fill(executionQuantity);
+        sellOrder.fill(executionQuantity, tradeAmount, sellerFees.commission(), sellerFees.tax());
 
         List<Posting> postings = new ArrayList<>();
         postings.add(Posting.cash(sellerAccount, executionAmount));
@@ -501,7 +513,6 @@ public class MatchingEngineTransactionService {
             -executionQuantity, sellerHolding.getTotalPurchaseAmount()));
         postings.add(Posting.of(sellerAccount, LedgerAccount.REALIZED_PNL, realizedProfit.negate()));
 
-        Fees sellerFees = fees(executionPrice, executionQuantity);
         addFeePostings(postings, sellerAccount, sellerFees);
 
         String tradeId = UUID.randomUUID().toString();
@@ -614,18 +625,11 @@ public class MatchingEngineTransactionService {
             .build());
     }
 
-    private Fees fees(BigDecimal executionPrice, long executionQuantity) {
-        return new Fees(
-            money(commissionCalculator.calculateCommission(executionPrice, executionQuantity)),
-            money(commissionCalculator.calculateTax(executionPrice, executionQuantity))
-        );
-    }
-
     /**
      * 수수료·세금을 현금에서 차감하고 비용 분개를 붙인다.
      *
-     * <p>0이면 아무것도 하지 않는다 — 0원 분개는 정보가 없다. 운영은 {@code ZeroCommissionCalculator}라
-     * 항상 이 경로지만, 체결 경로는 수수료가 있다고 가정하고 동작한다.
+     * <p>0이면 아무것도 하지 않는다 — 0원 분개는 정보가 없다. 운영은 요율 0이라 항상 이 경로지만,
+     * 체결 경로는 수수료가 있다고 가정하고 동작한다.
      *
      * <p>매수자는 {@code affordableQuantity()}가 수수료까지 낼 수 있는 수량으로 캡을 씌운다. 매도자는 받은
      * 체결대금에서 수수료를 내므로 캡이 없다 — 수수료가 체결대금보다 큰 계산기가 아니라면 음수가 될 수 없다.
@@ -643,13 +647,6 @@ public class MatchingEngineTransactionService {
         }
         if (fees.tax().signum() > 0) {
             postings.add(Posting.of(account, LedgerAccount.TAX, fees.tax()));
-        }
-    }
-
-    private record Fees(BigDecimal commission, BigDecimal tax) {
-
-        BigDecimal total() {
-            return commission.add(tax);
         }
     }
 
