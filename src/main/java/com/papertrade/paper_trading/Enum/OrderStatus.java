@@ -1,6 +1,15 @@
 package com.papertrade.paper_trading.Enum;
 
 public enum OrderStatus {
+
+    /**
+     * 접수는 했지만 현재가를 확보하지 못해 접수 검증을 마치지 못한 주문. 매칭에 쓰지 않는다.
+     *
+     * <p>지정가는 가격 밴드 검증이, 시장가는 주문가격 변환(매수는 주문가능금액 검증까지)이 남아 있다.
+     * 현재가를 확보하면 검증을 마치고 {@link #PENDING}이 되거나 거절된다.
+     */
+    AWAITING_PRICE,
+
     PENDING,
     PARTIALLY_FILLED,
     FILLED,

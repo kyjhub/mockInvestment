@@ -6,7 +6,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResult;
 import com.papertrade.paper_trading.Entity.Account;
@@ -80,7 +79,7 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
         persistOrder(account, stock, OrderSide.SELL, "100000.0000", 10L);
         Order buyOrder = persistOrder(account, stock, OrderSide.BUY, "100000.0000", 10L);
 
-        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook(), dailyPriceRange());
+        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook());
 
         Order reloaded = orderRepository.findById(buyOrder.getId()).orElseThrow();
         assertThat(reloaded.getFilledQuantity()).isZero();
@@ -101,7 +100,7 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
         persistOrder(seller, stock, OrderSide.SELL, "1000.0000", 5L);
         Order buyOrder = persistOrder(buyer, stock, OrderSide.BUY, "1000.0000", 5L);
 
-        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook(), dailyPriceRange());
+        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook());
 
         assertThat(orderRepository.findById(buyOrder.getId()).orElseThrow().getFilledQuantity())
             .isEqualTo(5L);
@@ -131,12 +130,12 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
                 CyclicBarrier barrier = new CyclicBarrier(2);
                 Future<?> first = pool.submit(() -> {
                     barrier.await(10, TimeUnit.SECONDS);
-                    matchingEngine.matchOrder(buyOnA.getId(), emptyOrderBook(), dailyPriceRange());
+                    matchingEngine.matchOrder(buyOnA.getId(), emptyOrderBook());
                     return null;
                 });
                 Future<?> second = pool.submit(() -> {
                     barrier.await(10, TimeUnit.SECONDS);
-                    matchingEngine.matchOrder(buyOnB.getId(), emptyOrderBook(), dailyPriceRange());
+                    matchingEngine.matchOrder(buyOnB.getId(), emptyOrderBook());
                     return null;
                 });
                 // 데드락이면 PostgreSQL이 한쪽을 abort시켜 예외가 올라온다.
@@ -171,7 +170,7 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
         persistOrder(cheapestSeller, stock, OrderSide.SELL, "1000.0000", 1L);
 
         Order buyOrder = persistOrder(buyer, stock, OrderSide.BUY, "9000.0000", 1L);
-        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook(), dailyPriceRange());
+        matchingEngine.matchOrder(buyOrder.getId(), emptyOrderBook());
 
         // 가장 싼 1,000에 체결되어야 한다. 9,000에 체결됐다면 상한이 가격 우선순위를 뒤집은 것이다.
         Account settled = accountRepository.findById(buyer.getId()).orElseThrow();
@@ -236,7 +235,7 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
     /** 종목 전체 스윕. matchOrder를 직접 부르면 계좌 상한까지만 체결된다. */
     private void matchSymbolFor(Stock stock) {
         when(orderBookService.getOrderBookForMatching(anyString(), any())).thenReturn(emptyOrderBook());
-        matchingEngine.matchSymbol(stock.getSymbol(), dailyPriceRange());
+        matchingEngine.matchSymbol(stock.getSymbol());
     }
 
     // --- fixtures ---
@@ -283,8 +282,4 @@ class SelfTradeAndConstraintIntegrationTest extends IntegrationTestContainers {
         return new OrderBookResponse(new OrderBookResult(null, "USD", List.of(), List.of()), LocalDateTime.now());
     }
 
-    private DailyPriceRangeResponse dailyPriceRange() {
-        return new DailyPriceRangeResponse("ST", null, new BigDecimal("200000.0000"),
-            new BigDecimal("100.0000"), "USD");
-    }
 }

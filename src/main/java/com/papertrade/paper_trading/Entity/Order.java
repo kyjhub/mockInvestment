@@ -43,6 +43,7 @@ import org.hibernate.annotations.UpdateTimestamp;
 public class Order {
 
     private static final List<OrderStatus> CANCELABLE_STATUSES = List.of(
+        OrderStatus.AWAITING_PRICE,
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
     );
@@ -147,16 +148,42 @@ public class Order {
             .build();
     }
 
+    /**
+     * 현재가를 확보하지 못한 채 접수하는 주문. 접수 검증이 끝날 때까지 매칭에 쓰지 않는다.
+     *
+     * <p>시장가는 주문가격을 아직 정하지 못했으므로 {@code orderPrice}가 {@code null}이다. 매수라면
+     * 구속 단가도 {@code null}이라 구속액이 0이고, 주문가능금액 검증은 {@link #confirmPrice}할 때 한다.
+     */
+    public static Order createAwaitingPrice(
+        Account account,
+        Stock stock,
+        String clientOrderId,
+        OrderSide orderSide,
+        OrderType orderType,
+        BigDecimal orderPrice,
+        Long orderQuantity,
+        BigDecimal reservedUnitPrice
+    ) {
+        Order order = create(
+            account, stock, clientOrderId, orderSide, orderType, orderPrice, orderQuantity, reservedUnitPrice);
+        order.status = OrderStatus.AWAITING_PRICE;
+        return order;
+    }
+
+    /** 접수 검증을 마치고 매칭 대상으로 넘긴다. 시장가는 여기서 주문가격과 구속 단가가 정해진다. */
+    public void confirmPrice(BigDecimal orderPrice, BigDecimal reservedUnitPrice) {
+        if (this.status != OrderStatus.AWAITING_PRICE) {
+            throw new IllegalArgumentException("접수 검증 대기 중인 주문이 아닙니다.");
+        }
+        this.orderPrice = orderPrice;
+        this.reservedUnitPrice = reservedUnitPrice;
+        this.status = OrderStatus.PENDING;
+    }
+
     public void fill(Long quantity) {
         this.filledQuantity += quantity;
         this.remainingQuantity -= quantity;
         this.status = this.remainingQuantity == 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-    }
-
-    public void waitRemainingAt(BigDecimal waitingPrice) {
-        if (this.remainingQuantity > 0) {
-            this.orderPrice = waitingPrice;
-        }
     }
 
     public void cancel() {
@@ -167,15 +194,6 @@ public class Order {
         this.canceledAt = LocalDateTime.now();
     }
 
-    /**
-     * 계좌 조건(잔고·보유 수량)으로 더 이상 체결될 수 없는 주문을 종료한다.
-     *
-     * <p>유동성이 없어서 체결이 안 된 주문에는 쓰지 않는다. 그건 계좌 문제가 아니라
-     * 시장 상태이므로 계속 대기해야 한다.
-     *
-     * <p>체결 이력이 있으면 {@code REJECTED}가 아니라 잔량 취소({@code CANCELED})로 종료한다.
-     * {@code REJECTED}는 접수 자체가 무효였다는 뜻이라 부분 체결과 같이 쓸 수 없다.
-     */
     /**
      * 당일 유효 주문을 거래일 종료로 실효시킨다.
      *
@@ -191,6 +209,15 @@ public class Order {
         this.closeReason = reason;
     }
 
+    /**
+     * 계좌 조건(잔고·보유 수량)으로 더 이상 체결될 수 없는 주문을 종료한다.
+     *
+     * <p>유동성이 없어서 체결이 안 된 주문에는 쓰지 않는다. 그건 계좌 문제가 아니라
+     * 시장 상태이므로 계속 대기해야 한다.
+     *
+     * <p>체결 이력이 있으면 {@code REJECTED}가 아니라 잔량 취소({@code CANCELED})로 종료한다.
+     * {@code REJECTED}는 접수 자체가 무효였다는 뜻이라 부분 체결과 같이 쓸 수 없다.
+     */
     public void reject(String reason) {
         if (!CANCELABLE_STATUSES.contains(this.status)) {
             throw new IllegalArgumentException("이미 종료된 주문은 거절할 수 없습니다.");

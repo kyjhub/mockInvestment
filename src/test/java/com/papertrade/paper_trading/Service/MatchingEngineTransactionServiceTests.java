@@ -9,7 +9,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import com.papertrade.paper_trading.Dto.OrderBookResponse;
 import com.papertrade.paper_trading.Repository.AccountRepository;
 import com.papertrade.paper_trading.Repository.ExecutionRepository;
@@ -47,7 +46,7 @@ class MatchingEngineTransactionServiceTests {
             orderId == 2L ? new IllegalArgumentException("보유 수량이 부족합니다.") : null
         );
 
-        service.matchSymbol(SYMBOL, dailyPriceRange());
+        service.matchSymbol(SYMBOL);
 
         assertThat(attemptedOrderIds).containsExactly(1L, 2L, 3L);
     }
@@ -59,7 +58,7 @@ class MatchingEngineTransactionServiceTests {
             orderId == 2L ? new IllegalStateException("DB connection lost") : null
         );
 
-        assertThatThrownBy(() -> service.matchSymbol(SYMBOL, dailyPriceRange()))
+        assertThatThrownBy(() -> service.matchSymbol(SYMBOL))
             .isInstanceOf(IllegalStateException.class)
             .hasMessage("DB connection lost");
 
@@ -83,17 +82,12 @@ class MatchingEngineTransactionServiceTests {
             mock(ExecutionRepository.class),
             mock(HoldingRepository.class),
             new LedgerPostingService(mock(LedgerTransactionRepository.class), mock(LedgerEntryRepository.class)),
-            mock(DailyPriceRangeService.class),
             orderBookService,
             mock(CommissionCalculator.class),
             passThroughTransactionManager()
         ) {
             @Override
-            public void matchOrder(
-                Long orderId,
-                OrderBookResponse orderBook,
-                DailyPriceRangeResponse dailyPriceRange
-            ) {
+            public void matchOrder(Long orderId, OrderBookResponse orderBook) {
                 attemptedOrderIds.add(orderId);
                 RuntimeException failure = failurePlan.failureFor(orderId);
                 if (failure != null) {
@@ -119,10 +113,6 @@ class MatchingEngineTransactionServiceTests {
             public void rollback(TransactionStatus status) {
             }
         };
-    }
-
-    private DailyPriceRangeResponse dailyPriceRange() {
-        return new DailyPriceRangeResponse(SYMBOL, null, null, null, "USD");
     }
 
     @FunctionalInterface

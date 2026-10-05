@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class AccountQueryService {
 
     private static final List<OrderStatus> RESERVING_STATUSES = List.of(
+        OrderStatus.AWAITING_PRICE,
         OrderStatus.PENDING,
         OrderStatus.PARTIALLY_FILLED
     );

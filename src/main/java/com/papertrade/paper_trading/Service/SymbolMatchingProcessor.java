@@ -1,7 +1,6 @@
 package com.papertrade.paper_trading.Service;
 
 import com.papertrade.paper_trading.Client.TossApiQuotaUnavailableException;
-import com.papertrade.paper_trading.Dto.DailyPriceRangeResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -22,7 +21,6 @@ import org.springframework.stereotype.Service;
 public class SymbolMatchingProcessor {
 
     private final SymbolOrderLockService symbolOrderLockService;
-    private final DailyPriceRangeService dailyPriceRangeService;
     private final MatchingEngineTransactionService matchingEngineTransactionService;
 
     public SymbolMatchingResult process(String symbol) {
@@ -34,9 +32,8 @@ public class SymbolMatchingProcessor {
         }
 
         try {
-            DailyPriceRangeResponse dailyPriceRange = dailyPriceRangeService.getDailyPriceRange(symbol);
             // 호가가 매칭 도중 바뀌면 그 변경이 스스로 다음 트리거를 만든다. 여기서 반복하지 않는다.
-            matchingEngineTransactionService.matchSymbol(symbol, dailyPriceRange);
+            matchingEngineTransactionService.matchSymbol(symbol);
             return SymbolMatchingResult.SUCCESS;
         } catch (TossApiQuotaUnavailableException e) {
             log.debug("Skip matching because Toss API quota is unavailable. symbol={}", symbol);
