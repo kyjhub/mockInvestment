@@ -20,41 +20,20 @@ spring:
       host: localhost
       port: 56379
 
-# 스케줄 작업이 측정에 끼어들지 않도록 주기를 사실상 무한대로 둔다.
+# 스케줄 작업을 하나도 돌리지 않는다. 벤치마크는 측정 대상을 직접 호출한다.
+#
+# 주기를 늘려 중화하던 방식은 기동 직후의 첫 실행을 막지 못했다(fixedDelay는 initialDelay가 없으면
+# 바로 한 번 돈다). 재사용되는 벤치마크 DB에서는 그 첫 실행이 측정과 겹칠 수 있다.
+#   - 당일 주문 실효: 이전 회차의 미체결 주문이 전부 실효 대상이라 주문 row 락을 잡으며 대량으로 돈다
+#   - 총자산 평가: 쌓인 벤치마크 종목 전체의 시세를 조회하고 계좌를 일괄 갱신한다
+#   - 원장 대사: 전 계좌 집계 질의 8개가 DB를 통째로 흔든다
+#
+# 스케줄러가 돌아가는 상태를 재야 할 때는 ./gradlew benchmarkTest -Pscheduling=true 로 켠다.
+# 그때는 모든 스케줄러가 기본 주기로 돈다.
+scheduling:
+  enabled: false
+
 toss-invest:
   websocket:
+    # 스케줄링을 켜더라도 토스 WebSocket에는 연결하지 않는다. 외부 연결은 측정 대상이 아니다.
     enabled: false
-    slot-heartbeat-ms: 3600000
-    declare-debounce-ms: 3600000
-orderbook:
-  active-symbols:
-    refresh-ms: 3600000
-  polling:
-    fixed-delay-ms: 3600000
-    idle-fixed-delay-ms: 3600000
-price:
-  polling:
-    fixed-delay-ms: 3600000
-order:
-  awaiting-price:
-    fixed-delay-ms: 3600000
-  day-expiry:
-    # 벤치마크 DB는 컨테이너를 재사용해 이전 회차의 미체결 주문이 남는다. 이것들은 직전 거래일
-    # 종료 이전 접수분이라 실효 대상이 되고, 측정 도중 주문 row 락을 잡으며 대량으로 돈다.
-    fixed-delay-ms: 3600000
-valuation:
-  total-asset:
-    fixed-delay-ms: 3600000
-ledger:
-  reconciliation:
-    # 전 계좌 집계 질의 8개. 측정 구간과 겹치면 DB를 통째로 흔든다.
-    cron: "0 0 0 1 1 ?"
-matching-engine:
-  polling:
-    fixed-delay-ms: 3600000
-  stream:
-    pending-recovery-delay-ms: 3600000
-  rematch:
-    fixed-delay-ms: 3600000
-  dirty-drain:
-    fixed-delay-ms: 3600000

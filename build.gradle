@@ -61,4 +61,8 @@ tasks.register('benchmarkTest', Test) {
 	testLogging {
 		showStandardStreams = true
 	}
+	// 벤치마크 프로파일은 스케줄링을 끈다. 스케줄러가 돌아가는 상태를 재야 할 때만 -Pscheduling=true로 켠다.
+	if (project.hasProperty('scheduling')) {
+		systemProperty 'scheduling.enabled', project.property('scheduling')
+	}
 }
