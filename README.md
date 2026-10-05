@@ -60,13 +60,12 @@ JWT 기반 stateless 인증입니다. Access token 30분, refresh token 14일이
 
 ### 실시간 시세
 
-호가, 현재가, 일일 고저가 세 종류가 모두 Redis 캐시와 Pub/Sub를 거쳐 클라이언트에 전달됩니다. 캐시를 채우는 방법만 데이터별로 다릅니다.
+호가와 현재가 두 종류가 모두 Redis 캐시와 Pub/Sub를 거쳐 클라이언트에 전달됩니다. 캐시를 채우는 방법만 데이터별로 다릅니다.
 
 ```text
 [호가]      토스 WebSocket 푸시 ─┐
 [호가 폴백]  REST 폴링 ──────────┼→ Redis 캐시 → Redis Pub/Sub → STOMP 푸시
-[현재가]    REST 배치 폴링 ──────┤
-[고저가]    REST(캔들) + 자체 체결가 ─┘
+[현재가]    REST 배치 폴링 ──────┘
 ```
 
 호가는 REST 응답과 WebSocket 푸시가 `OrderBookService.applyOrderBook()` 한 지점으로 합류합니다. 그래서 캐시 저장, 변경 감지, Pub/Sub 발행, 매칭 트리거가 공급원과 무관하게 동일하게 동작합니다.
@@ -84,11 +83,10 @@ JWT 기반 stateless 인증입니다. Access token 30분, refresh token 14일이
 - 임계값(기본 30초)이 WebSocket 재연결 시간(2~3초)보다 넉넉해서, 짧은 단절에는 폴백이 발동하지 않습니다.
 - 분산 락으로 여러 인스턴스가 같은 종목을 중복 호출하지 않게 합니다.
 
-**현재가와 일일 고저가**
+**현재가**
 
-- 현재가는 한 번에 최대 200종목을 조회하는 배치 API를 써서 종목 수와 무관하게 초당 1~2회로 끝납니다. 실시간 대비 수 초 지연될 수 있습니다.
+- 한 번에 최대 200종목을 조회하는 배치 API를 써서 종목 수와 무관하게 초당 1~2회로 끝납니다. 실시간 대비 수 초 지연될 수 있습니다.
 - 캐시는 30초간 유지됩니다. 구독 중인 종목은 1초마다 갱신되고, 주문 접수는 30초 이내의 캐시를 그대로 씁니다.
-- 일일 고저가는 캔들 API로 채우는 화면 표시용 값입니다. 주문 접수와 매칭에는 쓰지 않습니다.
 
 ### 토스 API 인증
 
@@ -154,7 +152,6 @@ POST /api/v1/orders
 | --- | --- | --- |
 | `GET` | `/api/v1/orderbook?symbol=` | 매수·매도 호가 |
 | `GET` | `/api/v1/prices?symbols=` | 현재가 (쉼표로 여러 종목) |
-| `GET` | `/api/v1/daily-price-range?symbol=` | 일일 고가·저가 |
 | `GET` | `/api/v1/market-calendar/US?date=` | 미국 장 운영정보 (`date` 생략 시 오늘) |
 
 ### 주문
@@ -184,7 +181,6 @@ STOMP 엔드포인트는 `/ws`이고, 브로커 prefix는 `/topic`입니다.
 | --- | --- |
 | `/topic/orderbook/{symbol}` | 호가 갱신 |
 | `/topic/prices/{symbol}` | 현재가 갱신 |
-| `/topic/daily-price-range/{symbol}` | 일일 고저가 갱신 |
 
 구독하면 해당 종목이 폴링 대상에 자동으로 추가되고, 구독이 모두 끊기면 제외됩니다.
 
@@ -258,7 +254,6 @@ PostgreSQL datasource가 없으면 `contextLoads()`가 실패합니다. 나머�
 | `price.cache.ttl-seconds` | 30 | 현재가 캐시 TTL. 주문 접수가 허용하는 현재가의 나이 |
 | `order.market-price.margin` | 0.1 | 시장가를 지정가로 바꿀 때 현재가에 더하고 빼는 비율 |
 | `order.price-band.margin` | 0.5 | 지정가 주문가격이 현재가에서 벗어날 수 있는 비율 |
-| `daily-price-range.cache.ttl-seconds` | 5 | 일일 고저가 캐시 TTL |
 | `market-calendar.cache.ttl-hours` | 12 | 장 운영정보 캐시 TTL |
 | `matching-engine.lock.ttl-ms` | 15000 | 종목 매칭 락 TTL |
 | `matching-engine.rematch.fixed-delay-ms` | 30000 | 안전망 재매칭 주기 |
@@ -288,7 +283,7 @@ src/main/java/com/papertrade/paper_trading/
 
 - 회원가입, 로그인, 토큰 재발급·폐기
 - 토스 OAuth2 토큰 발급·캐싱·갱신
-- 호가·현재가·일일 고저가 REST 조회와 WebSocket 실시간 푸시
+- 호가·현재가 REST 조회와 WebSocket 실시간 푸시
 - 토스 WebSocket 호가 수신 (연결 슬롯 분산 점유, 구독 디바운스, 재연결 백오프)
 - 미국 장 운영정보 조회
 - 토스 API 호출량 제한(3개 그룹)과 예산 소진 대응

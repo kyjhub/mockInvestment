@@ -25,10 +25,11 @@ public class GlobalExceptionHandler {
      * 예산이 소진돼도 202 pending으로 응답할 수 있는 그룹.
      * 판정 기준은 그룹 이름이 아니라 "WebSocket 푸시 채널로 실제 데이터가 전달되는가"다.
      * market-info(장 운영정보)는 푸시 채널이 없어서 503 + Retry-After를 유지한다.
+     * market-data-chart(일봉)는 이제 주문 접수의 현재가 조회에만 쓰이고, 그 경로는 예산 부족을 예외로
+     * 올리지 않는다. 혹시 올라오더라도 푸시로 전달될 데이터가 없으므로 202가 아니라 503이 맞다.
      */
     private static final Set<String> PUSH_CHANNEL_GROUPS = Set.of(
-        TossApiRateLimiter.MARKET_DATA_GROUP,
-        TossApiRateLimiter.MARKET_DATA_CHART_GROUP
+        TossApiRateLimiter.MARKET_DATA_GROUP
     );
 
     @ExceptionHandler(IllegalArgumentException.class)

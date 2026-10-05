@@ -20,7 +20,7 @@
 | 실시간 상태 | Spring Data Redis | 시세·Toss access token 캐시, 분산 호출량 제한, 분산 락과 활성 종목 공유 |
 | 이벤트 처리 | Redis Stream | 종목 단위 비동기 매칭 요청과 재처리 |
 | 서버 간 실시간 전파 | Redis Pub/Sub | 여러 애플리케이션 인스턴스 간 시세 갱신 팬아웃 |
-| 클라이언트 실시간 전파 | STOMP WebSocket | 종목별 호가, 현재가, 일일 고저가 전송 |
+| 클라이언트 실시간 전파 | STOMP WebSocket | 종목별 호가, 현재가 전송 |
 | 외부 시세 | Toss Securities Open API REST + WebSocket | REST 장 운영정보·호가·현재가·일봉 조회와 WebSocket 호가 수신 |
 | 외부 인증 | OAuth 2.0 Client Credentials | Toss access token 발급·공유 캐시·401 재발급 |
 | 관측 | Spring Boot Actuator, Micrometer | health endpoint와 dirty-set 매칭 처리량·지연·적체량 metric |
@@ -212,10 +212,11 @@ toss-api:next-allowed-at:{group}
 
 캐시가 없고 공유 API 예산도 없을 때 다음과 같이 응답한다.
 
-- `market-data`, `market-data-chart`: HTTP 202, `Retry-After`, `status=pending`
+- `market-data`: HTTP 202, `Retry-After`, `status=pending`
+- `market-data-chart`: 주문 접수의 현재가 조회에만 쓰이며 그 경로는 예외를 올리지 않는다(§11.2). 올라오더라도 push로 전달될 데이터가 없으므로 503이다
 - `market-info`: HTTP 503, `Retry-After`
 
-앞의 두 그룹은 기존 polling → Redis Pub/Sub → STOMP 경로를 통해 나중에 실제 값이 전달될 수 있으므로 pending 응답을 사용한다. WebSocket을 사용하지 않는 클라이언트는 `Retry-After` 이후 REST 요청을 다시 할 수 있다. 장 운영정보에는 push 경로가 없으므로 클라이언트가 직접 재시도해야 한다.
+`market-data`는 기존 polling → Redis Pub/Sub → STOMP 경로를 통해 나중에 실제 값이 전달될 수 있으므로 pending 응답을 사용한다. WebSocket을 사용하지 않는 클라이언트는 `Retry-After` 이후 REST 요청을 다시 할 수 있다. 장 운영정보에는 push 경로가 없으므로 클라이언트가 직접 재시도해야 한다.
 
 ## 6. 미국 장 운영정보
 
@@ -373,36 +374,19 @@ SUBSCRIBE /topic/prices/{symbol}
 - `price:poll-lock:{symbol}`로 다중 인스턴스 중복 폴링을 줄인다.
 - 폴링 락을 위한 Redis 접근 실패 시 해당 폴링을 중단하는 fail-close 정책을 사용한다.
 
-## 9. 일일 고가/저가
+## 9. 일일 고가/저가 (삭제됨)
 
-### 9.1 API와 WebSocket
+2026-10-05에 화면 표시용 일일 고저가 기능(`GET /api/v1/daily-price-range`, `/topic/daily-price-range/{symbol}`, 1초 폴링)을 삭제했다. 화면은 캐시된 현재가를 보여준다.
 
-```text
-GET /api/v1/daily-price-range?symbol={symbol}
-SUBSCRIBE /topic/daily-price-range/{symbol}
-```
+고저가가 쓰이던 곳은 셋이었고 모두 현재가 기준으로 바뀌었다.
 
-### 9.2 데이터 생성 방식
+| 용도 | 전 | 후 |
+| --- | --- | --- |
+| 시장가 매수 구속 단가 | 당일 고가 | 시장가를 바꾼 지정가(현재가 +10%) — §13.11 |
+| 지정가 가격 밴드 | 당일 범위 ±30% | 현재가 ±50% — §13.10 |
+| 시장가 잔량 대기 가격 | 매칭 후 당일 고가/저가 | 불필요 — 접수 때부터 지정가 |
 
-일일 고가/저가는 별도 관계형 엔티티가 아니라 Toss의 최신 일봉에서 파생한다.
-
-```text
-GET /api/v1/candles
-  ?symbol={symbol}
-  &interval=1d
-  &count=1
-  &adjusted=true
-```
-
-`DailyPriceRangeService`는 `daily-price-range:{symbol}` Redis cache를 먼저 읽고, cache miss일 때만 Toss API를 호출한다. 기본 TTL은 5초다.
-
-### 9.3 주문·매칭에서의 사용
-
-없다. 시장가는 접수할 때 현재가 ±10%의 지정가로, 지정가 밴드는 현재가 ±50%로 바뀌었다(§11.2, §13.10). 매칭도 더 이상 고저가를 조회하거나 체결가로 갱신하지 않는다. 남은 용도는 화면 표시뿐이다.
-
-### 9.4 폴링
-
-일일 고저가 WebSocket 구독이 있는 심볼을 기본 1초 간격으로 폴링한다. 심볼 순서를 회전하며 `daily-price-range:poll-lock:{symbol}`로 중복 폴링을 줄인다.
+삭제 이유는 비용이다. 캔들 API는 일괄 조회가 없어 종목마다 1회를 쓰고, 1초 폴링이라 구독 16종목이면 `market-data-chart` 예산(초당 16회)이 찬다. 그런데 매칭이 종목을 돌 때마다 고저가를 먼저 조회했으므로, 화면 구독이 늘수록 주문 접수와 체결이 밀렸다. 체결 자체에는 고저가가 필요 없다.
 
 ## 10. WebSocket 구독 추적과 팬아웃
 
@@ -416,11 +400,10 @@ GET /api/v1/candles
 
 ### 10.2 구독 레지스트리
 
-세 가지 시세 유형은 `SymbolSubscriptionRegistry` 공통 구현을 사용한다.
+두 가지 시세 유형은 `SymbolSubscriptionRegistry` 공통 구현을 사용한다.
 
 - `PriceSubscriptionRegistry`
 - `OrderBookSubscriptionRegistry`
-- `DailyPriceRangeSubscriptionRegistry`
 
 레지스트리는 두 방향의 map을 함께 관리한다.
 
@@ -447,7 +430,6 @@ Map<symbol, Set<sessionId:subscriptionId>>
 | --- | --- |
 | `orderbook:updates` | `/topic/orderbook/{symbol}` |
 | `price:updates` | `/topic/prices/{symbol}` |
-| `daily-price-range:updates` | `/topic/daily-price-range/{symbol}` |
 
 Redis 메시지를 DTO로 역직렬화한 뒤 `SimpMessagingTemplate`로 해당 topic에 전송한다. 이를 통해 어느 서버 인스턴스가 Toss 데이터를 조회했는지와 무관하게 모든 인스턴스가 자신에게 연결된 WebSocket 클라이언트로 전달할 수 있다.
 
@@ -1125,7 +1107,8 @@ Funding request, reset, snapshot, leaderboard, exchange rate 등은 엔티티만
 | DTO bean validation 실패 | 400, 필드별 오류 message |
 | method parameter 제약 위반 | 400, property path별 오류 message |
 | `TossOpenApiException` | Toss가 반환한 상태코드와 오류 정보 |
-| `market-data`, `market-data-chart` quota 부족 | 202, pending body와 `Retry-After` |
+| `market-data` quota 부족 | 202, pending body와 `Retry-After` |
+| `market-data-chart` quota 부족 | 503, 오류 body와 `Retry-After`. 현재 이 예외를 올리는 경로는 없다 |
 | `market-info` quota 부족 | 503, 오류 body와 `Retry-After` |
 | 그 밖의 예외 | 500, 일반화된 한국어 message |
 
@@ -1173,9 +1156,6 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `price.cache.ttl-seconds` | 30 | 현재가 cache TTL. 주문 접수가 허용하는 현재가의 나이 (§11.2) |
 | `price.polling.fixed-delay-ms` | 1000 | 현재가 polling 간격 |
 | `price.polling.lock-ttl-ms` | 900 | 현재가 polling lock TTL |
-| `daily-price-range.cache.ttl-seconds` | 5 | 일일 고저가 cache TTL |
-| `daily-price-range.polling.fixed-delay-ms` | 1000 | 일일 고저가 polling 간격 |
-| `daily-price-range.polling.lock-ttl-ms` | 900 | 일일 고저가 polling lock TTL |
 | `order.price-band.margin` | 0.5 | 지정가 주문가격이 현재가에서 벗어날 수 있는 비율 (§13.10) |
 | `order.market-price.margin` | 0.1 | 시장가 주문을 지정가로 바꿀 때 현재가에 더하고 빼는 비율 (§11.2) |
 | `order.awaiting-price.fixed-delay-ms` | 1000 | 접수 검증 대기 주문의 검증 주기 (§11.2) |
@@ -1202,7 +1182,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | Scheduler bean | Thread 수 | 담당 작업 |
 | --- | ---: | --- |
 | `taskScheduler` | 4 | 활성 호가 종목 heartbeat, Stream 신규/PEL 소비, 30초 안전망 등 기본 작업 |
-| `marketDataPollingScheduler` | 3 | 호가·현재가·일일 고저가 REST polling, 접수 검증 대기 주문 검증 |
+| `marketDataPollingScheduler` | 3 | 호가·현재가 REST polling, 접수 검증 대기 주문 검증 |
 | `dirtyDrainScheduler` | 1 | dirty set drain과 종목 매칭 |
 | `webSocketScheduler` | 1 고정 | Toss 슬롯 생애주기, 구독 배정·선언, ping |
 
@@ -1255,7 +1235,6 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `PriceServiceOrderPriceTests` | 5 | 단위 | 주문용 현재가의 캐시 우선, 일봉 예산 사용, 예산·공급자 실패를 예외 없이 "모름"으로 |
 | `AwaitingPriceOrderSchedulerTests` | 3 | 단위 | 종목당 1회 조회, 가격 없는 주문 대기 유지, 실패 격리 |
 | `MarketPriceLookupTests` | 3 | 단위 | 200개씩 나눠 조회, 예산 소진 시 받은 시세 유지 |
-
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
 | `SelfTradeAndConstraintIntegrationTest` | 7 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 큰 주문의 완전 체결, 음수 잔고·보유 DB 거부 |
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
