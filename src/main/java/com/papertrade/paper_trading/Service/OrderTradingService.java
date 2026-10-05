@@ -37,20 +37,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Slf4j
 public class OrderTradingService {
 
-    private static final int MONEY_SCALE = 2;
     private static final int PRICE_SCALE = 4;
     private static final String PRICE_OUT_OF_BAND = "주문가격이 허용 범위를 벗어났습니다.";
-
-    /**
-     * 예수금·보유 수량을 묶어 두는 주문. 접수 검증 대기 주문도 들어간다 — 지정가 매수는 접수할 때 이미
-     * 구속액 검증을 통과했고, 매도는 수량을 묶어야 같은 주식을 두 번 팔지 못한다.
-     * 가격이 아직 없는 시장가 매수는 구속 단가가 {@code null}이라 합계에 들어가지 않는다.
-     */
-    private static final List<OrderStatus> RESERVING_STATUSES = List.of(
-        OrderStatus.AWAITING_PRICE,
-        OrderStatus.PENDING,
-        OrderStatus.PARTIALLY_FILLED
-    );
 
     private final AccountRepository accountRepository;
     private final StockRepository stockRepository;
@@ -58,7 +46,7 @@ public class OrderTradingService {
     private final ExecutionRepository executionRepository;
     private final HoldingRepository holdingRepository;
     private final PriceService priceService;
-    private final CommissionCalculator commissionCalculator;
+    private final CashReservationCalculator cashReservationCalculator;
     private final SymbolMatchRequestedStreamPublisher symbolMatchRequestedStreamPublisher;
     private final PlatformTransactionManager transactionManager;
 
@@ -290,13 +278,15 @@ public class OrderTradingService {
         return side == OrderSide.BUY ? orderPrice : null;
     }
 
+    /**
+     * 수수료·세금까지 묶을 수 있는지 본다. 새 주문만이 아니라 이미 걸린 주문들의 구속액에도 수수료가 들어간다.
+     * 계좌 row를 잠근 상태에서 호출해야 한다 — 그래야 동시에 들어온 두 요청이 같은 주문가능금액을 읽지 않는다.
+     */
     private void validateOrderableAmount(Account account, BigDecimal reservedUnitPrice, Long quantity) {
-        BigDecimal required = money(reservedUnitPrice.multiply(BigDecimal.valueOf(quantity)))
-            .add(money(commissionCalculator.calculateCommission(reservedUnitPrice, quantity)))
-            .add(money(commissionCalculator.calculateTax(reservedUnitPrice, quantity)));
+        BigDecimal required = cashReservationCalculator.requiredCash(reservedUnitPrice, quantity);
 
         BigDecimal orderableAmount = account.getCashBalance()
-            .subtract(orderRepository.sumReservedCash(account.getId(), RESERVING_STATUSES));
+            .subtract(cashReservationCalculator.reservedCash(account.getId()));
 
         if (orderableAmount.compareTo(required) < 0) {
             throw new IllegalArgumentException("주문가능금액이 부족합니다.");
@@ -310,16 +300,12 @@ public class OrderTradingService {
         long reservedQuantity = orderRepository.sumReservedQuantity(
             account.getId(),
             stock.getId(),
-            RESERVING_STATUSES
+            CashReservationCalculator.RESERVING_STATUSES
         );
 
         if (heldQuantity - reservedQuantity < quantity) {
             throw new IllegalArgumentException("매도가능수량이 부족합니다.");
         }
-    }
-
-    private BigDecimal money(BigDecimal amount) {
-        return amount.setScale(MONEY_SCALE, RoundingMode.HALF_UP);
     }
 
     private void publishAfterCommit(String symbol) {

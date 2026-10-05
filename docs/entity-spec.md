@@ -282,7 +282,7 @@ Notes:
 - `initialBalance` represents the requested amount for the current trading round.
 - `cashBalance` and `realizedProfit` are caches derived from the ledger: `cash_balance = Σ(CASH entries)`, `realized_profit = −Σ(REALIZED_PNL entries)`. Daily reconciliation verifies them.
 - `totalAssetValue` is refreshed by `TotalAssetValuationScheduler` from cash plus market value. It is not ledger-derived and is not used by any read path yet.
-- Orderable cash is not stored. It is `cash_balance − Σ(reserved_unit_price × remaining_quantity)` over the account's open buy orders.
+- Orderable cash is not stored. It is `cash_balance − Σ(reserved_unit_price × remaining_quantity + estimated commission + estimated tax)` over the account's open buy orders (`AWAITING_PRICE`, `PENDING`, `PARTIALLY_FILLED`), computed by `CashReservationCalculator`. Fees are summed per order in Java because fee schedules (minimum commission, tiers) cannot be expressed in SQL.
 - `AccountOpeningService.open()` creates the account and its `ACCOUNT_OPENING` ledger transaction in one DB transaction. Sign-up does not call it yet.
 - Cumulative performance should be calculated from `AccountFundingRequest` history plus the current account state, scoped after the latest `AccountReset.resetAt` when a reset exists. Do not use `LeaderboardRanking` as the source of truth.
 

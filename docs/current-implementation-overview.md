@@ -992,7 +992,11 @@ realizedProfit += executionAmount - costBasis
 
 컬럼이 맞는지 검증하는 것 자체는 가능하다 — 미체결 주문을 집계해서 비교하면 된다. 다만 **그 대사의 기준값이 곧 파생값**이므로, 그럴 거면 컬럼을 둘 이유가 읽기 속도밖에 남지 않는다. 그 읽기 속도를 위해 해제 코드, 드리프트 대사 batch, 어긋났을 때의 복구 절차를 떠안게 된다.
 
-대신 `OrderRepository.sumReservedCash()` / `sumReservedQuantity()`가 미체결 주문에서 집계한다. **해제 경로라는 것이 존재하지 않는다** — 체결되면 `remaining_quantity`가 줄고, 취소·거절되면 `status`가 빠지면서 합계에서 자동으로 사라진다. 부분 체결도 자동 반영된다. 드리프트가 개념적으로 발생할 수 없다.
+대신 미체결 주문에서 매번 집계한다. 현금은 `CashReservationCalculator`, 수량은 `OrderRepository.sumReservedQuantity()`가 맡는다. **해제 경로라는 것이 존재하지 않는다** — 체결되면 `remaining_quantity`가 줄고, 취소·거절·실효되면 `status`가 빠지면서 합계에서 자동으로 사라진다. 부분 체결도 자동 반영된다. 드리프트가 개념적으로 발생할 수 없다.
+
+**주문 한 건의 구속액은 `체결대금 + 수수료 + 세금` 예상액이다.** 체결대금만 묶으면 이미 걸린 주문들의 수수료만큼 예수금을 넘는 주문이 접수된다. 수수료 체계(정률, 최소 수수료, 구간제)는 SQL로 표현할 수 없으므로, `OrderRepository.findCashReservations()`로 미체결 매수 주문의 구속 단가와 잔량을 읽어 계산기로 더한다. 계좌당 미체결 주문은 당일 실효(§11.5) 덕분에 하루치로 제한되어 비용이 작다. 주문 접수, 접수 검증 대기 확정, 잔고 화면이 모두 같은 계산기를 쓴다.
+
+접수 시점의 예상액이라 체결 시점 실제 차감액과 다를 수 있다. 부분 체결마다 최소 수수료가 붙거나 그사이 요율이 바뀌는 경우다. 그래서 체결 시점 잔고 캡(§19.4)을 최종 방어선으로 남긴다 — 접수 검증은 사용자에게 정확한 주문가능금액을, 체결 캡은 원장이 깨지지 않음을 보장한다.
 
 집계 비용을 위해 `orders(account_id, order_side, status)` index를 둔다.
 
@@ -1000,7 +1004,7 @@ realizedProfit += executionAmount - costBasis
 
 매수 주문이 1주당 구속하는 금액을 접수 시점에 정해 저장한다. **주문가격 그 자체**다 — 시장가도 접수할 때 지정가로 바뀌므로 같다. 매도 주문과 가격이 아직 없는 접수 검증 대기 주문은 `null`이다.
 
-파생값을 저장하는 것처럼 보이지만 성격이 다르다. **주문의 불변 속성**이라 드리프트가 생길 수 없고, 덕분에 구속액 집계가 외부 시세 조회 없이 `orders` 한 테이블에서 순수 SQL로 끝난다. 계좌 row lock을 쥔 채 Toss를 기다리는 일이 없어야 하므로 이 점이 중요하다.
+파생값을 저장하는 것처럼 보이지만 성격이 다르다. **주문의 불변 속성**이라 드리프트가 생길 수 없고, 덕분에 구속액 집계가 외부 시세 조회 없이 `orders` 한 테이블과 수수료 계산기만으로 끝난다. 계좌 row lock을 쥔 채 Toss를 기다리는 일이 없어야 하므로 이 점이 중요하다.
 
 #### 시장가 매수의 구속 단가
 
@@ -1024,9 +1028,6 @@ realizedProfit += executionAmount - costBasis
 
 6번이 없으면 동시에 들어온 두 요청이 같은 주문가능금액을 읽고 둘 다 통과해 예수금을 넘긴다. 계좌 단위로 직렬화하는 것이 이 검증의 전제다.
 
-#### 남아 있는 것
-
-수수료·세금 예상액을 구속액에 더한다. 현재 `ZeroCommissionCalculator`라 0이지만 규약은 세워 두었다.
 
 ### 13.12 원장 대사
 
@@ -1221,7 +1222,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-26개 test class에 132개 test가 있다(벤치마크 제외).
+27개 test class에 138개 test가 있다(벤치마크 제외).
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1235,7 +1236,8 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `MatchingEngineStreamConsumerTests` | 3 | 단위 | 구형 호가 이벤트 이관, lock busy PEL 유지, quota ACK |
 | `MatchingEngineTransactionServiceTests` | 2 | 단위 | 주문별 비즈니스 예외 격리와 시스템 예외 전파 |
 | `OrderFillLedgerIntegrityTests` | 10 | 단위 | 부분 체결 생존, 보유·잔고 캡, 체결 불가 상대 건너뛰기, 거절 판정, 수수료를 포함한 잔고 캡(정률·최소 수수료, 내부 체결 매도자 수수료) |
-| `OrderPlacementReservationIntegrationTest` | 19 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가의 지정가 변환(±10%), 현재가 밴드, 매도가능수량, 접수 검증 대기와 그 확정·거절·취소 |
+| `OrderPlacementReservationIntegrationTest` | 20 | 통합 | 예수금 초과 주문 거절, 동시 접수 경합, 취소 후 회복, 시장가의 지정가 변환(±10%), 현재가 밴드, 매도가능수량, 접수 검증 대기와 그 확정·거절·취소, 미체결 주문 수수료의 구속 |
+| `CashReservationCalculatorTests` | 5 | 단위 | 구속액에 미체결 주문별 수수료 포함, 최소 수수료의 주문별 적용, 새 주문과 같은 규칙 |
 | `PriceServiceOrderPriceTests` | 5 | 단위 | 주문용 현재가의 캐시 우선, 일봉 예산 사용, 예산·공급자 실패를 예외 없이 "모름"으로 |
 | `AwaitingPriceOrderSchedulerTests` | 3 | 단위 | 종목당 1회 조회, 가격 없는 주문 대기 유지, 실패 격리 |
 | `MarketPriceLookupTests` | 3 | 단위 | 200개씩 나눠 조회, 예산 소진 시 받은 시세 유지 |
@@ -1267,7 +1269,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-10-06 기준 `./gradlew test`는 **132건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-10-06 기준 `./gradlew test`는 **138건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 
@@ -1288,7 +1290,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - 주문 목록 및 단건 조회 API
 - DLQ 검색, replay, 삭제 관리 API
 - dirty-set metric의 외부 scrape endpoint 노출과 dashboard/alert 구성
-- 수수료와 세금의 실제 값. 원장 모델(FEE/TAX 분개), 현금 차감, 수수료를 포함한 체결 시점 잔고 캡은 있으나 운영 계산기가 0을 반환한다. 미체결 주문 구속액에 수수료를 포함하는 것은 남아 있다(§19.4)
+- 수수료와 세금의 실제 값. 원장 모델(FEE/TAX 분개), 현금 차감, 수수료를 포함한 체결 시점 잔고 캡은 있으나 운영 계산기가 0을 반환한다. 접수 시 구속액과 체결 시 잔고 캡 모두 수수료를 포함한다(§19.4)
 - DB migration 또는 schema provisioning 도구
 
 ## 19. 현재 구조에서 주의할 점
@@ -1391,11 +1393,10 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | --- | --- |
 | 체결 시 현금 차감과 `FEE`/`TAX` 분개 | 동작한다. `addFeePostings()`가 계좌 현금을 차감하고 비용 분개를 같은 원장 거래에 붙인다. 0이면 분개를 만들지 않는다 |
 | `executions.commission`/`tax` | 표시용 사본으로 저장된다. 대사 7·8번이 합계를 검증한다 |
-| 접수 시 구속액 | 수수료·세금 예상액을 더해 검증한다 |
+| 접수 시 구속액 | 동작한다. 새 주문과 이미 걸린 미체결 매수 주문 모두 `체결대금 + 수수료 + 세금` 예상액으로 묶는다(`CashReservationCalculator`, §13.11) |
 | 체결 시 잔고 캡 | 동작한다. `affordableQuantity()`가 `체결대금 + 수수료 + 세금 ≤ 예수금`인 최대 수량을 구한다. 수수료 체계(정률, 최소 수수료, 구간제)마다 식이 달라 역산하지 않고, 수수료 없이 살 수 있는 수량을 상한으로 이분 탐색한다. 전제는 수량이 늘면 총비용이 줄지 않는다는 것 하나다. 수수료가 0이면 상한에서 바로 끝난다. 매도자는 받은 체결대금에서 수수료를 내므로 캡이 없다 |
-| **다른 미체결 주문의 구속액** | **수수료가 빠져 있다.** `sumReservedCash()`는 `reserved_unit_price × remaining_quantity`만 SQL로 더한다. 새 주문의 수수료는 검증에 들어가지만 이미 걸려 있는 주문들의 수수료는 주문가능금액에서 빠지지 않으므로, 수수료가 있으면 그만큼 초과 접수가 가능하다. 원장은 체결 시 잔고 캡이 지킨다 — 초과분은 체결할 때 잘리고 잔량이 거절된다 |
 
-체결 경로는 수수료가 있다고 가정하고 동작하므로, 운영에서는 0으로 두더라도 계산기만 바꾸면 수수료를 도입할 수 있다. 접수 단계의 보장("예수금을 넘는 주문은 접수되지 않는다")까지 수수료에 대해 지키려면 위 구속액 집계가 수수료를 포함해야 한다.
+접수와 체결 모두 수수료가 있다고 가정하고 동작하므로, 운영에서는 0으로 두더라도 `CommissionCalculator` 구현체만 바꾸면 수수료를 도입할 수 있다. 두 검사는 역할이 다르다. 접수 시점 예상액은 부분 체결마다 붙는 최소 수수료나 요율 변경 때문에 실제 차감액보다 작을 수 있으므로, 체결 시 잔고 캡이 최종 방어선이다.
 
 ### 19.5 Redis와 DB 사이의 원자성
 

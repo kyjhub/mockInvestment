@@ -113,23 +113,25 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     );
 
     /**
-     * 미체결 매수 주문이 예수금에서 구속하고 있는 금액.
+     * 미체결 매수 주문의 구속 단가와 잔량. 구속액 계산은 {@code CashReservationCalculator}가 한다.
      *
-     * <p>가용잔고를 컬럼으로 저장하지 않고 여기서 파생한다. 컬럼으로 두면 체결·취소·거절마다 해제
-     * 코드를 넣어야 하고, 하나라도 빠지면 그 금액이 영구히 묶인다. 어긋났는지 확인하려면 결국 아래 쿼리로
-     * 대사해야 하는데, 그럴 거면 컬럼을 둘 이유가 읽기 속도밖에 남지 않는다.
-     * 주문에서 파생하면 해제 경로라는 것이 존재하지 않는다 — 체결되면 remainingQuantity가 줄고
-     * 취소·거절되면 status가 빠지면서 합계에서 자동으로 사라진다.
+     * <p>SQL로 {@code sum(reserved_unit_price * remaining_quantity)}를 바로 내지 않는 이유는 수수료다.
+     * 수수료 체계(정률, 최소 수수료, 구간제)는 SQL로 표현할 수 없어서, 주문별로 읽어 계산기로 더한다.
+     *
+     * <p>구속액을 컬럼으로 저장하지 않고 여기서 파생하므로 해제 경로라는 것이 존재하지 않는다 — 체결되면
+     * remainingQuantity가 줄고 취소·거절·실효되면 status가 빠지면서 합계에서 자동으로 사라진다.
      */
     @Query("""
-        select coalesce(sum(o.reservedUnitPrice * o.remainingQuantity), 0)
+        select new com.papertrade.paper_trading.Repository.OrderRepository$CashReservation(
+            o.reservedUnitPrice, o.remainingQuantity)
         from Order o
         where o.account.id = :accountId
           and o.orderSide = com.papertrade.paper_trading.Enum.OrderSide.BUY
           and o.status in :statuses
           and o.reservedUnitPrice is not null
+          and o.remainingQuantity > 0
         """)
-    BigDecimal sumReservedCash(
+    List<CashReservation> findCashReservations(
         @Param("accountId") Long accountId,
         @Param("statuses") Collection<OrderStatus> statuses
     );
@@ -186,6 +188,9 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     }
 
     record AwaitingPriceOrder(Long id, String symbol) {
+    }
+
+    record CashReservation(BigDecimal unitPrice, Long quantity) {
     }
 
 }

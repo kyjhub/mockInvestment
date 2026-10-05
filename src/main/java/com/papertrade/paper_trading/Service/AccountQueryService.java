@@ -5,10 +5,8 @@ import com.papertrade.paper_trading.Dto.AccountValuation;
 import com.papertrade.paper_trading.Entity.Account;
 import com.papertrade.paper_trading.Entity.Holding;
 import com.papertrade.paper_trading.Entity.User;
-import com.papertrade.paper_trading.Enum.OrderStatus;
 import com.papertrade.paper_trading.Repository.AccountRepository;
 import com.papertrade.paper_trading.Repository.HoldingRepository;
-import com.papertrade.paper_trading.Repository.OrderRepository;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
@@ -20,14 +18,8 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class AccountQueryService {
 
-    private static final List<OrderStatus> RESERVING_STATUSES = List.of(
-        OrderStatus.AWAITING_PRICE,
-        OrderStatus.PENDING,
-        OrderStatus.PARTIALLY_FILLED
-    );
-
     private final AccountRepository accountRepository;
-    private final OrderRepository orderRepository;
+    private final CashReservationCalculator cashReservationCalculator;
     private final HoldingRepository holdingRepository;
     private final MarketPriceLookup marketPriceLookup;
     private final ValuationService valuationService;
@@ -42,8 +34,8 @@ public class AccountQueryService {
             .orElseThrow(() -> new IllegalArgumentException("계좌를 찾을 수 없습니다."));
 
         // 조회는 락을 잡지 않는다. 여기서 본 주문가능금액은 그 시점의 값이고,
-        // 실제 판정은 주문 접수 시점에 계좌 row를 잠근 뒤 다시 집계해서 한다.
-        BigDecimal reservedCash = orderRepository.sumReservedCash(account.getId(), RESERVING_STATUSES);
+        // 실제 판정은 주문 접수 시점에 계좌 row를 잠근 뒤 같은 계산기로 다시 집계해서 한다.
+        BigDecimal reservedCash = cashReservationCalculator.reservedCash(account.getId());
 
         // 화면에 보이는 평가액은 batch가 갱신한 total_asset_value가 아니라 지금 시세로 계산한다.
         // 그 컬럼은 분 단위 캐시라 사용자가 보는 순간의 값과 어긋날 수 있다.

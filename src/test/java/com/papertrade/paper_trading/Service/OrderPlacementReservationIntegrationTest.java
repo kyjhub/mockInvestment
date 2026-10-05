@@ -2,8 +2,10 @@ package com.papertrade.paper_trading.Service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 
 import com.papertrade.paper_trading.Dto.AccountBalanceResponse;
@@ -89,6 +91,10 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     @MockitoBean
     private PriceService priceService;
 
+    /** 운영은 수수료 0이다. 수수료가 필요한 test만 {@link #givenCommissionRate}로 정한다. */
+    @MockitoBean
+    private CommissionCalculator commissionCalculator;
+
     private User user;
     private Account account;
     private Stock stock;
@@ -122,6 +128,8 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
             .build());
         // 잔고 화면의 평가용 시세. 이 class는 평가를 검증하지 않으므로 비워 둔다.
         when(priceService.getPrices(anyList())).thenReturn(new PriceResponse(List.of()));
+        givenCommissionRate("0");
+        when(commissionCalculator.calculateTax(any(), any())).thenReturn(BigDecimal.ZERO);
     }
 
     @Test
@@ -354,6 +362,24 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
     }
 
     @Test
+    void feesOfOpenOrdersStayReservedSoTheNextOrderCannotUseThem() {
+        // 1% 수수료. 첫 주문은 495,000 + 4,950을 묶는다. 수수료를 빼고 체결대금만 묶으면
+        // 주문가능금액이 505,000으로 보여 두 번째 주문(500,000 + 5,000)이 통과하고, 예수금을 4,950 넘긴다.
+        givenCommissionRate("0.01");
+        givenCurrentPrice("495000.0000");
+        orderTradingService.placeOrder(user, buyLimit("495000.0000", 1L));
+
+        AccountBalanceResponse balance = accountQueryService.getBalance(user);
+        assertThat(balance.reservedCash()).isEqualByComparingTo("499950.00");
+        assertThat(balance.orderableAmount()).isEqualByComparingTo("500050.00");
+
+        givenCurrentPrice("500000.0000");
+        assertThatThrownBy(() -> orderTradingService.placeOrder(user, buyLimit("500000.0000", 1L)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("주문가능금액이 부족합니다.");
+    }
+
+    @Test
     void sellOrdersAreCappedByHeldQuantityAcrossOrders() {
         givenCurrentPrice("100.0000");
         holdingRepository.save(holdingWith(5L));
@@ -402,6 +428,15 @@ class OrderPlacementReservationIntegrationTest extends IntegrationTestContainers
 
     private OrderPlaceRequest marketSell(long quantity) {
         return new OrderPlaceRequest(null, stock.getSymbol(), OrderSide.SELL, OrderType.MARKET, null, quantity);
+    }
+
+    private void givenCommissionRate(String rate) {
+        BigDecimal commissionRate = new BigDecimal(rate);
+        // doAnswer 형태여야 한다. when(...)으로 다시 스텁하면 이전 answer가 null 인자로 한 번 실행된다.
+        doAnswer(call -> call.<BigDecimal>getArgument(0)
+            .multiply(BigDecimal.valueOf(call.<Long>getArgument(1)))
+            .multiply(commissionRate))
+            .when(commissionCalculator).calculateCommission(any(), any());
     }
 
     private void givenCurrentPrice(String price) {
