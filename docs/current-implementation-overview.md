@@ -16,7 +16,7 @@
 | 애플리케이션 | Java 21, Spring Boot 3.5.16 | 단일 Spring Boot 애플리케이션 |
 | HTTP API | Spring Web MVC | 인증, 시세 조회, 주문 접수 및 취소 API |
 | 인증/인가 | Spring Security, JWT, BCrypt | Stateless 인증과 사용자 상태 확인 |
-| 영속성 | Spring Data JPA, PostgreSQL | 사용자, 계좌, 주문, 체결, 보유량, 현금 원장 저장 |
+| 영속성 | Spring Data JPA, PostgreSQL | 사용자, 계좌, 주문, 체결, 보유량, 복식부기 원장 저장 |
 | 실시간 상태 | Spring Data Redis | 시세·Toss access token 캐시, 분산 호출량 제한, 분산 락과 활성 종목 공유 |
 | 이벤트 처리 | Redis Stream | 종목 단위 비동기 매칭 요청과 재처리 |
 | 서버 간 실시간 전파 | Redis Pub/Sub | 여러 애플리케이션 인스턴스 간 시세 갱신 팬아웃 |
@@ -41,7 +41,7 @@ Controller / Spring Security
         v
 Service
   |-- PostgreSQL + JPA
-  |     사용자, 계좌, 주문, 체결, 보유량, 현금 원장
+  |     사용자, 계좌, 주문, 체결, 보유량, 복식부기 원장
   |
   |-- Redis
   |     최신 시세 캐시
@@ -865,9 +865,9 @@ ledger_entries        분개. 한 거래에 2줄 이상, 금액 합계는 항상
 
 ### 13.5 내부 주문 체결
 
-내부 매수자와 내부 매도자가 체결될 때 한 transaction에서 다음을 수행한다.
+내부 매수자와 내부 매도자가 체결될 때 한 transaction(체결 한 건)에서 `executeInternalTrade()`가 다음을 수행한다.
 
-1. 매수자와 매도자 계좌에 write lock을 건다.
+1. 호출자(`matchBuyOnce`/`matchSellOnce`)가 양쪽 계좌를 id 오름차순으로 미리 잠가 둔다. 여기서는 새로 잠그지 않는다 — 잡는 순간 획득 순서가 트랜잭션마다 달라져 데드락이 생긴다. 잠긴 목록에 없으면 0을 반환한다.
 2. 매도자의 보유 row를 조회한다. 없으면 **0을 반환하고 끝낸다** — 예외를 던지지 않는다.
 3. 요청 수량에 매도자 보유 수량과 매수자 구매 가능 수량으로 캡을 씌운다. 결과가 0이면 0을 반환한다.
 4. 매수자의 보유 row를 조회하거나 생성한다. 체결이 0이면 빈 보유 row를 만들지 않도록 캡 계산 뒤에 한다.
@@ -876,21 +876,25 @@ ledger_entries        분개. 한 거래에 2줄 이상, 금액 합계는 항상
 7. 매도자의 실현손익을 증가시킨다.
 8. 매수자의 보유 수량과 평균단가를 갱신한다.
 9. 양쪽 주문의 체결/잔여 수량과 상태를 갱신한다.
-10. 매수와 매도 각각의 `Execution`을 저장한다.
-11. 양쪽 계좌 각각에 `CashTransaction`을 저장한다.
+10. **원장 거래 1건**(`TRADE`, 멱등키 `FILL:{tradeId}`)에 양쪽 계좌의 분개 5줄을 함께 기록한다(§13.4). 수수료·세금이 0이 아니면 계좌별로 현금을 차감하고 비용 분개를 붙인다. 분개는 엔티티를 모두 갱신한 뒤에 만든다 — `balance_after`가 갱신 후 값이어야 하기 때문이다. 기록은 `LedgerPostingService`를 통해서만 하며 거래 단위 합계 0을 검증한다.
+11. 매수와 매도 각각의 `Execution`을 저장한다. 두 건 모두 같은 `trade_id`와 10번의 원장 거래를 가리킨다.
 12. **실제 체결한 수량을 반환한다.**
+
+계좌별로 원장 거래를 나누지 않는 이유는 경제적 사건이 "체결 1건"이기 때문이다. 멱등키도 그 단위로 걸어야 같은 체결이 두 번 기록되지 않는다.
 
 반환값 0은 "이 상대방과는 체결할 수 없다"는 뜻이다. 호출자는 그 상대를 후보 제외 목록에 넣고 다음 후보로 넘어간다. 제외하지 않으면 같은 후보를 계속 다시 뽑아 무한 loop가 된다. 제외 목록은 `OrderRepository.findMatchableSellOrders()` / `findMatchableBuyOrders()`의 `excludedOrderIds` 파라미터로 전달되며, 호출자가 항상 자기 주문 ID를 넣고 시작하므로 비는 경우가 없다.
 
 ### 13.6 Toss 외부 호가 체결
+
+상대 계좌가 없으므로 자기 계좌 하나만 잠그고, 원장 거래 1건에 자기 쪽 분개만 기록한다.
 
 외부 ask에 매수 주문이 체결되면 다음을 수행한다.
 
 - 매수자 현금 차감
 - 매수 보유량 및 평균단가 갱신
 - 매수 주문 수량과 상태 갱신
-- `Execution` 저장
-- 음수 `BUY` 현금 원장 저장
+- 원장 거래 1건: `CASH −대금`, `SECURITIES +대금 (수량 +)` (+ 수수료·세금 분개)
+- `Execution` 1건 저장, 원장 거래와 `trade_id` 연결
 
 외부 bid에 매도 주문이 체결되면 다음을 수행한다.
 
@@ -898,8 +902,8 @@ ledger_entries        분개. 한 거래에 2줄 이상, 금액 합계는 항상
 - 매도자 현금 증가
 - 실현손익 갱신
 - 매도 주문 수량과 상태 갱신
-- `Execution` 저장
-- 양수 `SELL` 현금 원장 저장
+- 원장 거래 1건: `CASH +대금`, `SECURITIES −취득원가 (수량 −)`, `REALIZED_PNL −(대금−취득원가)` (+ 수수료·세금 분개)
+- `Execution` 1건 저장, 원장 거래와 `trade_id` 연결
 
 ### 13.7 보유 평균단가와 실현손익
 
@@ -1073,7 +1077,7 @@ realizedProfit += executionAmount - costBasis
 
 ### 14.2 현재 Repository가 있는 엔티티
 
-실제 서비스 흐름에 사용되는 Repository는 다음 8개다.
+실제 서비스 흐름에 사용되는 Repository는 다음 10개다.
 
 - `UserRepository`
 - `RefreshTokenRepository`
@@ -1082,20 +1086,19 @@ realizedProfit += executionAmount - costBasis
 - `OrderRepository`
 - `ExecutionRepository`
 - `HoldingRepository`
-- `CashTransactionRepository`
+- `LedgerTransactionRepository`
+- `LedgerEntryRepository`
+- `LedgerReconciliationRepository` — 원장 대사(§13.12)의 집계 질의. 엔티티 하나에 묶이지 않고 불일치 항목만 돌려준다
 
 Funding request, reset, snapshot, leaderboard, exchange rate 등은 엔티티만 있으며 현재 Repository와 기능 흐름은 구현되어 있지 않다.
 
-### 14.3 현금 원장
+### 14.3 원장
 
-체결로 현금이 변경될 때 `CashTransaction`을 append한다.
+현금·보유·실현손익의 원본은 복식부기 원장(`ledger_transactions`, `ledger_entries`)이다. 기록 방식은 §13.4, 검증은 §13.12에 있다. 단식부기 `cash_transactions`는 삭제했다.
 
-- 매수: 음수 금액
-- 매도: 양수 금액
-- `balanceAfter`에 변경 직후 계좌 잔액 기록
-- 관련 `Order`와 `Execution` 참조 기록
+`accounts.cash_balance`, `accounts.realized_profit`, `holdings.quantity`, `holdings.total_purchase_amount`는 읽기 속도를 위한 캐시이며 원장에서 재계산해 대사한다.
 
-현재 구현된 주문 체결 경로에서는 `BUY`, `SELL` 유형을 사용한다. 초기 입금, 수수료, 세금, 조정 유형은 enum과 모델에는 있지만 실제 서비스 흐름은 아직 없다.
+현재 서비스 흐름이 기록하는 거래 유형은 `ACCOUNT_OPENING`(계좌 개설)과 `TRADE`(체결)다. `FUNDING`, `FEE`, `ADJUSTMENT`, `RESET`은 enum에만 있고 아직 기록하는 흐름이 없다. 정정은 원본을 남긴 채 `reversal_of_id`로 연결한 반대 거래를 추가하는 방식으로 설계되어 있다.
 
 ## 15. 예외 처리
 
@@ -1377,7 +1380,16 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 19.4 수수료 전략 확장 시 현금 반영
 
-현재 수수료와 세금은 항상 0이어서 계좌 잔고 결과에 영향이 없다. 향후 `CommissionCalculator`가 0이 아닌 값을 반환하더라도 현재 코드는 `Execution`에 값만 저장하고 계좌 현금 차감 및 별도 `COMMISSION`, `TAX` 원장을 만들지 않는다.
+현재 수수료와 세금은 항상 0이다(`ZeroCommissionCalculator`). 0이 아닌 계산기로 바꿨을 때 이미 동작하는 것과 아직 아닌 것이 있다.
+
+| 경로 | 상태 |
+| --- | --- |
+| 체결 시 현금 차감과 `FEE`/`TAX` 분개 | 동작한다. `addFeePostings()`가 계좌 현금을 차감하고 비용 분개를 같은 원장 거래에 붙인다. 0이면 분개를 만들지 않는다 |
+| `executions.commission`/`tax` | 표시용 사본으로 저장된다. 대사 7·8번이 합계를 검증한다 |
+| 접수 시 구속액 | 수수료·세금 예상액을 더해 검증한다 |
+| **체결 시 잔고 캡** | **수수료를 고려하지 않는다.** `affordableQuantity()`가 체결대금만으로 수량을 정하므로, 수수료를 더하면 현금이 모자랄 수 있다. 그 경우 `cash_balance >= 0` CHECK 제약에 걸려 그 체결 트랜잭션이 실패한다 |
+
+수수료 정책을 켜기 전에 체결 시 잔고 캡이 수수료를 포함하도록 고쳐야 한다.
 
 ### 19.5 Redis와 DB 사이의 원자성
 
