@@ -827,6 +827,15 @@ ledger_entries        분개. 한 거래에 2줄 이상, 금액 합계는 항상
 
 **불변식**: 거래별 `SUM(amount) = 0`, 전역 `SUM(amount) = 0`. 두 번째가 복식부기를 쓰는 이유다 — 버그로 돈이 생기거나 사라진 것을 탐지하는 유일한 수단이며, 단식부기로는 원리적으로 불가능하다.
 
+
+**기본키는 `SEQUENCE`(pooled, allocationSize=50)이고 `hibernate.jdbc.batch_size=50`이 켜져 있다.** `IDENTITY`면 Hibernate가 생성 키를 INSERT 직후 받아야 해서 배치가 막힌다. 내부 체결 1건이 원장에 6행(거래 1 + 분개 5)을 쓰므로 그대로 6번의 DB 왕복이 되고, 그 왕복을 계좌 락을 쥔 채로 한다. 측정해 보니 원장 쓰기가 체결 1건의 24%를 차지했고, `SEQUENCE`로 바꾼 뒤 674us로 절반 이하가 됐다(threads=1 기준 53.9% 단축, docs/load-test-candidates.md ④).
+
+같은 측정에서 **복식부기 자체의 대가는 체결당 404us**로 나왔다. 단식부기 대비 추가 비용이며, 전역 합계 검증을 얻는 값으로 싸다. 느린 쪽은 복식부기가 아니라 ID 전략이었다.
+
+`allocationSize`는 **DB 시퀀스의 `increment`와 반드시 같아야 한다.** 어긋나면 id가 겹친다. 그리고 `SEQUENCE`로 바꾸면 `id` 컬럼의 `DEFAULT nextval(...)`이 사라지므로, id를 생략하는 INSERT는 전부 깨진다.
+
+기존 스키마에서 이관할 때는 `ledger_transactions_seq`·`ledger_entries_seq`를 기존 `max(id)` 위에서 시작하도록 `increment by 50`으로 만들어야 한다.
+
 부호는 표준 회계를 따른다. 자산 계정(`CASH`, `SECURITIES`)은 증가가 `+`, 수익·자본 계정(`REALIZED_PNL`, `EQUITY_FUNDING`)은 증가가 `−`, 비용 계정(`FEE`, `TAX`)은 발생이 `+`다.
 
 | 사건 | 분개 |

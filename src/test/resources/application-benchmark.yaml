@@ -8,6 +8,13 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
+    properties:
+      hibernate:
+        jdbc:
+          # SEQUENCE 변형이 실제로 배치되는지 보려면 켜야 한다.
+          # IDENTITY인 운영 엔티티는 이 값과 무관하게 배치되지 않으므로 대조군은 영향받지 않는다.
+          batch_size: 50
+        order_inserts: true
   data:
     redis:
       host: localhost
@@ -31,6 +38,18 @@ price:
 daily-price-range:
   polling:
     fixed-delay-ms: 3600000
+order:
+  day-expiry:
+    # 벤치마크 DB는 컨테이너를 재사용해 이전 회차의 미체결 주문이 남는다. 이것들은 직전 거래일
+    # 종료 이전 접수분이라 실효 대상이 되고, 측정 도중 주문 row 락을 잡으며 대량으로 돈다.
+    fixed-delay-ms: 3600000
+valuation:
+  total-asset:
+    fixed-delay-ms: 3600000
+ledger:
+  reconciliation:
+    # 전 계좌 집계 질의 8개. 측정 구간과 겹치면 DB를 통째로 흔든다.
+    cron: "0 0 0 1 1 ?"
 matching-engine:
   polling:
     fixed-delay-ms: 3600000
