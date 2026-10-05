@@ -1,7 +1,0 @@
-package com.papertrade.paper_trading.WebSocket;
-
-import org.springframework.stereotype.Component;
-
-@Component
-public class DailyPriceRangeSubscriptionRegistry extends SymbolSubscriptionRegistry {
-}
