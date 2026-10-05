@@ -24,7 +24,8 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class PriceService {
 
-    private static final int MAX_SYMBOL_COUNT = 200;
+    /** 토스 현재가 API가 한 요청에 받는 최대 종목 수. */
+    public static final int MAX_SYMBOL_COUNT = 200;
     private static final Pattern SYMBOL_PATTERN = Pattern.compile("^[A-Za-z0-9.\\-]+$");
     private static final String PRICE_CACHE_KEY_PREFIX = "price:";
     private static final String PRICE_POLL_LOCK_KEY_PREFIX = "price:poll-lock:";
