@@ -16,7 +16,7 @@
 | 애플리케이션 | Java 21, Spring Boot 3.5.16 | 단일 Spring Boot 애플리케이션 |
 | HTTP API | Spring Web MVC | 인증, 시세 조회, 주문 접수 및 취소 API |
 | 인증/인가 | Spring Security, JWT, BCrypt | Stateless 인증과 사용자 상태 확인 |
-| 영속성 | Spring Data JPA, PostgreSQL | 사용자, 계좌, 주문, 체결, 보유량, 복식부기 원장 저장 |
+| 영속성 | Spring Data JPA, PostgreSQL, Flyway | 사용자, 계좌, 주문, 체결, 보유량, 복식부기 원장 저장. 스키마는 Flyway 마이그레이션이 소유 |
 | 실시간 상태 | Spring Data Redis | 시세·Toss access token 캐시, 분산 호출량 제한, 분산 락과 활성 종목 공유 |
 | 이벤트 처리 | Redis Stream | 종목 단위 비동기 매칭 요청과 재처리 |
 | 서버 간 실시간 전파 | Redis Pub/Sub | 여러 애플리케이션 인스턴스 간 시세 갱신 팬아웃 |
@@ -1138,7 +1138,8 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `spring.datasource.url` | `jdbc:postgresql://localhost:5432/papertrading` | PostgreSQL JDBC URL |
 | `spring.datasource.username` | `papertrading` | PostgreSQL 사용자 |
 | `spring.datasource.password` | `papertrading` | PostgreSQL 비밀번호 |
-| `spring.jpa.hibernate.ddl-auto` | `none` | 기본 schema 자동 변경 비활성화 |
+| `spring.jpa.hibernate.ddl-auto` | `validate` | 엔티티와 테이블이 맞는지만 확인한다. 스키마는 Flyway가 만든다 (§19.8) |
+| `spring.flyway.baseline-on-migrate` | `true` | Flyway 도입 전 `ddl-auto`로 만든 DB를 V1 적용 상태로 보고 건너뛴다 |
 | `spring.jpa.open-in-view` | `false` | 요청 종료까지 persistence context 유지 안 함 |
 | `scheduling.enabled` | `true` | `false`면 `@Scheduled` 작업을 하나도 등록하지 않는다. 벤치마크 프로파일이 끈다 (§17.4) |
 | `spring.task.scheduling.pool.size` | 4 | 기본 scheduler pool |
@@ -1229,7 +1230,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 통합 테스트는 `IntegrationTestContainers`를 상속하고 둘 중 하나를 붙인다.
 
-`src/test/resources/application-integration.yaml`이 schema 생성(`ddl-auto: update`)과 background 작업 차단을 맡는다. `create-drop`이 아닌 이유는 컨테이너를 여러 test context가 공유하는데 한 context가 닫히며 schema를 지우면 cache된 다른 context가 테이블을 잃기 때문이다. 컨테이너가 JVM마다 새로 뜨므로 stale schema는 생기지 않는다.
+`src/test/resources/application-integration.yaml`이 스키마와 background 작업 차단을 맡는다. 스키마는 운영과 같은 Flyway 마이그레이션(`db/migration`)으로 만들고 `ddl-auto: validate`로 엔티티와 맞는지 검증한다. `update`로 두지 않는 이유는 마이그레이션에 빠진 컬럼을 Hibernate가 몰래 채워 넣어, 테스트는 통과하고 운영에서야 터지기 때문이다. 벤치마크용 테스트 엔티티(`bench_ledger_*`)가 테스트 클래스패스에서 함께 스캔되므로, 그 테이블은 테스트 전용 반복 마이그레이션(`src/test/resources/db/test-migration/R__benchmark_tables.sql`)이 만든다.
 
 ### 17.3 현재 테스트
 
@@ -1302,7 +1303,6 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 - DLQ 검색, replay, 삭제 관리 API
 - dirty-set metric의 외부 scrape endpoint 노출과 dashboard/alert 구성
 - 수수료와 세금의 실제 값. 원장 모델(FEE/TAX 분개), 현금 차감, 수수료를 포함한 체결 시점 잔고 캡은 있으나 운영 계산기가 0을 반환한다. 접수 시 구속액과 체결 시 잔고 캡 모두 수수료를 포함한다(§19.4)
-- DB migration 또는 schema provisioning 도구
 
 ## 19. 현재 구조에서 주의할 점
 
@@ -1427,6 +1427,12 @@ Redis 슬롯 lock은 계정의 동시 WebSocket 연결 수를 2개로 제한하�
 
 ### 19.8 실행과 운영 구성
 
-`application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `SPRING_JPA_DDL_AUTO=update`와 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
+`application.yaml`은 localhost PostgreSQL/Redis 접속 기본값을 제공하고, `docker-compose.yml`은 PostgreSQL 17, Redis 7, 애플리케이션 컨테이너를 함께 실행할 수 있게 구성되어 있다. Compose의 app은 로컬 검증을 위해 `TOSS_WS_ENABLED=false`를 기본 사용한다. `Dockerfile`은 Java 21 multi-stage build로 test를 제외하고 boot JAR를 만든 뒤 non-root 사용자로 실행한다.
 
-다만 migration 도구와 CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 애플리케이션 자체의 `ddl-auto` 기본값은 `none`이므로 Compose 밖의 실제 환경에서는 schema를 별도로 준비해야 한다. `orders.rejected_at`, `orders.close_reason`(§13.9), `orders.reserved_unit_price`와 index `idx_orders_account_side_status`(§13.11), 주문 단위 수수료용 `orders.filled_amount`·`charged_commission`·`charged_tax`(§13.8, DB 기본값 0)가 최근 추가되었으므로 기존 schema에는 별도로 적용해야 한다. `close_reason`은 `reject_reason`을 이름만 바꾼 것이고(§11.5), `order_status` 값에 `EXPIRED`와 `AWAITING_PRICE`(§11.2)가 추가되었다. Hibernate가 enum 컬럼에 만든 `CHECK` 제약이 있다면 새 값을 허용하도록 바꿔야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.
+**스키마는 Flyway가 소유한다.** `src/main/resources/db/migration`의 마이그레이션이 기동할 때 적용되고, Hibernate는 `ddl-auto: validate`로 엔티티와 테이블이 맞는지만 확인한다. 맞지 않으면 기동이 실패한다.
+
+- `V1__init_schema.sql`은 2026-10-13 운영 엔티티에서 Hibernate가 생성한 DDL이다. CHECK 제약(잔고·보유 음수 금지, 주문 수량 불변식, enum 값)과 원장 시퀀스(`increment by 50`)가 모두 들어 있다.
+- **스키마를 바꿀 때는 엔티티와 함께 `V2__...sql`처럼 새 마이그레이션을 추가한다.** 적용된 마이그레이션 파일을 고치면 체크섬이 달라져 Flyway가 기동을 거부한다.
+- Flyway 도입 전에 `ddl-auto`로 만든 DB(로컬 Compose 볼륨, 벤치마크 컨테이너)는 이력 테이블이 없다. `baseline-on-migrate`가 이런 DB를 V1 적용 상태로 표시하고 건너뛴다. 그 DB가 V1과 다르면 `validate`가 기동을 막는다. 특히 최근 추가된 컬럼(`orders.filled_amount`·`charged_commission`·`charged_tax`, `close_reason` 등)이나 CHECK 제약은 `ddl-auto: update`가 만들어 주지 않았을 수 있으니, 개발 DB는 볼륨을 지우고 새로 만드는 것이 가장 간단하다.
+
+CI 설정은 없다. 통합 테스트가 Docker를 요구하므로 CI를 붙일 때 Docker 사용 가능 여부를 먼저 확인해야 한다. 운영에서는 PostgreSQL·Redis, Toss client ID/secret, 허용 IP, 충분히 강한 JWT secret도 별도로 구성해야 한다.

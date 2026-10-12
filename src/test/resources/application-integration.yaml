@@ -1,11 +1,13 @@
 # 통합 테스트 profile. 접속 정보는 IntegrationTestContainers가 @DynamicPropertySource로 덮어쓴다.
 spring:
+  flyway:
+    # 운영 마이그레이션 + 테스트 전용 테이블(벤치마크 엔티티가 테스트 클래스패스에서 함께 스캔된다).
+    locations: classpath:db/migration,classpath:db/test-migration
   jpa:
     hibernate:
-      # 컨테이너가 JVM마다 새로 뜨므로 stale schema가 없다.
-      # create-drop이 아닌 이유: 컨테이너를 여러 test context가 공유하는데,
-      # 한 context가 닫히며 schema를 지우면 cache된 다른 context가 테이블을 잃는다.
-      ddl-auto: update
+      # 스키마는 운영과 같은 Flyway 마이그레이션으로 만들고, 엔티티와 맞는지 검증한다.
+      # update로 두면 마이그레이션에 빠진 컬럼을 Hibernate가 몰래 채워 넣어 운영에서야 터진다.
+      ddl-auto: validate
 
 # 외부 연결과 background 작업이 테스트에 끼어들지 않게 한다.
 toss-invest:

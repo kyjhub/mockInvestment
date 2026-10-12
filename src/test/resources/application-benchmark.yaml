@@ -5,9 +5,12 @@ spring:
     url: jdbc:postgresql://localhost:55432/papertrading
     username: papertrading
     password: papertrading
+  flyway:
+    # 재사용되는 로컬 컨테이너라 Flyway 도입 전 스키마가 남아 있을 수 있다. application.yaml의 baseline 설정이 처리한다.
+    locations: classpath:db/migration,classpath:db/test-migration
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     properties:
       hibernate:
         jdbc:
