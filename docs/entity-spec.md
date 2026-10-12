@@ -26,7 +26,7 @@ It is intended as context for AI agents and developers working on this codebase.
 
 ## Domain Overview
 
-The service is a paper trading platform. A user owns exactly one account. The account can place orders, receive executions, and hold stocks. Every asset movement (account opening, fills, fees, taxes) is recorded in a double-entry ledger. Users can request a new paper trading amount after exhausting their current account balance. Funding request history is preserved for cumulative performance calculation.
+The service is a paper trading platform. The policy is one person, one user, one account. A user owns exactly one account (enforced by `accounts.user_id` unique). One user per person is a policy but not enforced yet: sign-up only checks email and nickname uniqueness, and identity verification is not implemented. Until it is, a person can create several users and trade between them; the limit-price band narrows that path but does not close it. The account can place orders, receive executions, and hold stocks. Every asset movement (account opening, fills, fees, taxes) is recorded in a double-entry ledger. Users can request a new paper trading amount after exhausting their current account balance. Funding request history is preserved for cumulative performance calculation.
 
 Leaderboard rankings are materialized ranking rows updated by batch after market close. They are derived data, not the source of truth.
 
