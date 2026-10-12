@@ -25,6 +25,7 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import org.hibernate.annotations.Check;
+import org.hibernate.annotations.ColumnDefault;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
@@ -95,6 +96,29 @@ public class Order {
 
     @Column(name = "remaining_quantity", nullable = false)
     private Long remainingQuantity;
+
+    /**
+     * 지금까지 체결된 금액의 합. 체결가 × 수량을 반올림하지 않고 더한다.
+     *
+     * <p>수수료를 주문 단위로 매기기 위해 둔다. 체결 건마다 수수료를 반올림하면 같은 금액이라도 나눠 체결될수록
+     * 수수료가 달라지므로, 누적 금액에 대한 수수료에서 이미 부과한 만큼을 빼서 이번 체결에 매긴다.
+     */
+    @Column(name = "filled_amount", precision = 19, scale = 4, nullable = false)
+    @ColumnDefault("0")
+    @Builder.Default
+    private BigDecimal filledAmount = BigDecimal.ZERO;
+
+    /** 이 주문에 지금까지 부과한 수수료. 원장의 {@code FEE} 분개 합과 같다. */
+    @Column(name = "charged_commission", precision = 19, scale = 2, nullable = false)
+    @ColumnDefault("0")
+    @Builder.Default
+    private BigDecimal chargedCommission = BigDecimal.ZERO;
+
+    /** 이 주문에 지금까지 부과한 세금. 원장의 {@code TAX} 분개 합과 같다. */
+    @Column(name = "charged_tax", precision = 19, scale = 2, nullable = false)
+    @ColumnDefault("0")
+    @Builder.Default
+    private BigDecimal chargedTax = BigDecimal.ZERO;
 
     @Enumerated(EnumType.STRING)
     @Column(length = 20, nullable = false)
@@ -180,9 +204,19 @@ public class Order {
         this.status = OrderStatus.PENDING;
     }
 
-    public void fill(Long quantity) {
+    /**
+     * 체결 한 건을 반영한다.
+     *
+     * @param tradeAmount 체결가 × 수량. 반올림하지 않은 값
+     * @param commission 이번 체결에 부과한 수수료 ({@code TradingFees.nextFill})
+     * @param tax 이번 체결에 부과한 세금
+     */
+    public void fill(Long quantity, BigDecimal tradeAmount, BigDecimal commission, BigDecimal tax) {
         this.filledQuantity += quantity;
         this.remainingQuantity -= quantity;
+        this.filledAmount = this.filledAmount.add(tradeAmount);
+        this.chargedCommission = this.chargedCommission.add(commission);
+        this.chargedTax = this.chargedTax.add(tax);
         this.status = this.remainingQuantity == 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
     }
 

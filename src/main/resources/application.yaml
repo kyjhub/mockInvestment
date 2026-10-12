@@ -95,6 +95,11 @@ order:
     # 지정가 주문가격이 현재가에서 벗어날 수 있는 비율.
     # 미국 시장에는 일일 가격제한폭이 없으므로 규제 한도가 아니라 오입력 방지 장치다.
     margin: ${ORDER_PRICE_BAND_MARGIN:0.5}
+  fee:
+    # 체결금액에 매기는 요율. 운영은 0이다. 체결·구속·잔고 캡은 수수료가 있다고 가정하고 동작하므로
+    # 수수료를 도입할 때는 이 값만 바꾸면 된다. 주문 단위 누적 체결금액에 매기고 센트에서 반올림한다.
+    commission-rate: ${ORDER_FEE_COMMISSION_RATE:0}
+    tax-rate: ${ORDER_FEE_TAX_RATE:0}
   market-price:
     # 시장가 주문을 지정가로 바꿀 때 현재가에 더하고(매수) 빼는(매도) 비율.
     margin: ${ORDER_MARKET_PRICE_MARGIN:0.1}

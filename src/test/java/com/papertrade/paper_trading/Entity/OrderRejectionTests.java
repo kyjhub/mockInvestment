@@ -30,7 +30,7 @@ class OrderRejectionTests {
     @Test
     void partiallyFilledOrderIsCanceledWithTheReasonPreserved() {
         Order order = order();
-        order.fill(3L);
+        order.fill(3L, new BigDecimal("300.0000"), BigDecimal.ZERO, BigDecimal.ZERO);
 
         order.reject("보유 수량이 부족합니다.");
 

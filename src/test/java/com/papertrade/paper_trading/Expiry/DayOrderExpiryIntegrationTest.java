@@ -162,7 +162,7 @@ class DayOrderExpiryIntegrationTest extends IntegrationTestContainers {
         givenTradingDayEndingAt(closedAt);
         Account account = accountOpeningService.open(persistUser(), new BigDecimal("1000000.00"));
         Order order = persistOrderSubmittedAt(account, closedAt.minusHours(3), 10L);
-        inTransaction(() -> orderRepository.findById(order.getId()).orElseThrow().fill(3L));
+        inTransaction(() -> orderRepository.findById(order.getId()).orElseThrow().fill(3L, new BigDecimal("300.0000"), BigDecimal.ZERO, BigDecimal.ZERO));
 
         expiryScheduler.expireDayOrders();
 

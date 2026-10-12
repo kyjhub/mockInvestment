@@ -83,7 +83,7 @@ class MatchingEngineTransactionServiceTests {
             mock(HoldingRepository.class),
             new LedgerPostingService(mock(LedgerTransactionRepository.class), mock(LedgerEntryRepository.class)),
             orderBookService,
-            mock(CommissionCalculator.class),
+            new TradingFees(RateCommissionCalculator.free()),
             passThroughTransactionManager()
         ) {
             @Override
