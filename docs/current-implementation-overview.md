@@ -1059,11 +1059,32 @@ realizedProfit += executionAmount - costBasis
 
 가용잔고는 저장하지 않고 `orders`에서 파생하므로 대사 대상이 아니다(§13.11).
 
-**불일치를 자동으로 덮어쓰지 않는다.** 조용히 맞춰 버리면 버그를 숨기게 된다. `ERROR` 로그와 `ledger.reconciliation.mismatch` metric으로 올리고 사람이 판단한다. 정정이 필요하면 원본을 남긴 채 반대분개를 추가한다.
+**불일치를 자동으로 덮어쓰지 않는다.** 조용히 맞춰 버리면 버그를 숨기게 된다. `ERROR` 로그와 `ledger.reconciliation.mismatch` metric으로 올리고 사람이 판단한다. 판단한 뒤 고치는 수단은 §13.13에 있다.
 
 모든 질의가 **불일치 항목만** 돌려준다. 계좌마다 집계해 비교하면 계좌 수에 비례해 느려지지만, 이 방식은 질의 수가 고정이라 데이터가 늘어도 비용이 검사 항목 수만큼만 늘어난다.
 
 7·8번은 거래 단위가 아니라 **전체 합계**로 비교하므로 서로 상쇄되는 오차는 잡지 못한다. 수수료가 0인 현재는 실질적 제약이 아니다.
+
+### 13.13 원장 정정
+
+대사가 보고한 불일치를 관리자가 원인을 확인한 뒤 고친다. `LedgerCorrectionService`가 담당하고, 관리자 API 두 개로 호출한다(`ADMIN` 역할만, 사유 필수). **어느 쪽도 과거 기록을 수정하거나 지우지 않는다.** 주문과 체결 기록도 그대로 둔다.
+
+| 불일치 | 대사 항목 | 수단 |
+| --- | --- | --- |
+| 원장은 맞고 캐시가 틀림 | 3~6번 | **캐시 재계산** `POST /api/v1/admin/ledger/accounts/{accountId}/cache-rebuild` |
+| 원장 자체가 틀림 | 1~2번, 또는 잘못 기록된 거래 | **반대분개** `POST /api/v1/admin/ledger/transactions/{transactionId}/reversal` |
+
+실제로 더 일어나기 쉬운 쪽은 캐시 불일치다. 원장 쓰기는 `LedgerPostingService` 한 통로에서 합계 0을 검증하지만, 캐시 갱신은 체결 코드 곳곳에 흩어져 있다.
+
+**캐시 재계산.** 계좌 row와 보유 row를 잠그고(체결과 같은 순서) `cash_balance = Σ(CASH)`, `realized_profit = −Σ(REALIZED_PNL)`, 종목별 `quantity`·`total_purchase_amount = Σ(SECURITIES)`로 덮어쓴다. 평균단가는 그 둘로 다시 구한다. 원장은 원본이므로 분개를 추가하지 않는다. 바뀐 값의 전후는 응답과 `WARN` 로그로 남긴다. 원장 합계 자체가 음수면 캐시만 맞춰서는 해결되지 않으므로 거부하고 반대분개를 먼저 요구한다.
+
+**반대분개.** 원거래는 그대로 두고, 그 거래의 분개를 금액·수량 부호만 뒤집어 새 거래(`ADJUSTMENT`, 멱등키 `REVERSAL:{원거래 id}`, `reversal_of_id`로 원거래 참조)로 기록한다. 새 분개가 생겼으므로 캐시도 같은 트랜잭션에서 반영한다 — 체결이 분개를 기록하며 잔고를 갱신하는 것과 같은 일이다. 계좌는 id 오름차순으로, 보유는 그 뒤에 잠근다.
+
+- **한 거래는 한 번만 정정한다.** 서비스가 먼저 거부하고, 동시에 들어온 요청은 `reversal_of_id` unique 제약(V2)이 막는다.
+- **반대분개는 다시 반대분개하지 않는다.** 뒤집으면 원거래가 되살아난다. 그게 필요하면 올바른 거래를 새로 기록해야 한다.
+- **결과가 음수면 거부한다.** 체결로 받은 돈이나 주식을 이미 써 버린 경우다. `cash_balance >= 0` 제약이 어차피 막지만 원인을 알 수 있는 메시지로 먼저 거부한다. 이런 경우를 미수처럼 처리하는 정책은 없다.
+
+승인 분리(요청자와 승인자를 나누는 것)는 하지 않는다. 누가 왜 했는지는 원장 거래 설명과 로그에 남는다.
 
 ## 14. 현재 영속 데이터 모델
 
@@ -1110,7 +1131,7 @@ Funding request, reset, snapshot, leaderboard, exchange rate 등은 엔티티만
 
 `accounts.cash_balance`, `accounts.realized_profit`, `holdings.quantity`, `holdings.total_purchase_amount`는 읽기 속도를 위한 캐시이며 원장에서 재계산해 대사한다.
 
-현재 서비스 흐름이 기록하는 거래 유형은 `ACCOUNT_OPENING`(계좌 개설)과 `TRADE`(체결)다. `FUNDING`, `FEE`, `ADJUSTMENT`, `RESET`은 enum에만 있고 아직 기록하는 흐름이 없다. 정정은 원본을 남긴 채 `reversal_of_id`로 연결한 반대 거래를 추가하는 방식으로 설계되어 있다.
+현재 서비스 흐름이 기록하는 거래 유형은 `ACCOUNT_OPENING`(계좌 개설), `TRADE`(체결), `ADJUSTMENT`(관리자 반대분개, §13.13)다. `FUNDING`, `FEE`, `RESET`은 enum에만 있고 아직 기록하는 흐름이 없다.
 
 ## 15. 예외 처리
 
@@ -1234,7 +1255,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.3 현재 테스트
 
-27개 test class에 138개 test가 있다(벤치마크 제외).
+28개 test class에 149개 test가 있다(벤치마크 제외).
 
 | Test class | 건수 | 층 | 검증 범위 |
 | --- | ---: | --- | --- |
@@ -1255,6 +1276,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 | `MarketPriceLookupTests` | 3 | 단위 | 200개씩 나눠 조회, 예산 소진 시 받은 시세 유지 |
 | `SchedulingConfigTests` | 3 | 단위 | `scheduling.enabled`에 따른 스케줄 작업 등록 여부, 꺼도 스케줄러 풀 유지 |
 | `LedgerReconciliationIntegrationTest` | 5 | 통합 | 대사 정상 판정, 잔고 조작 탐지, 분개 삭제 탐지, 자동 복구하지 않음 |
+| `LedgerCorrectionIntegrationTest` | 11 | 통합 | 캐시 재계산 후 대사 해소, 원장 불변, 반대분개의 원거래 보존·잔고 반영, 이중 정정·재정정·음수 거부, DB unique 제약, 관리자 API 권한·사유 검증 |
 | `SelfTradeAndConstraintIntegrationTest` | 7 | 통합 | 자전거래 차단, 정상 내부 체결 유지, 교차 종목 동시 매칭 데드락 부재, 큰 주문의 완전 체결, 음수 잔고·보유 DB 거부 |
 | `PriceTimePriorityIntegrationTest` | 3 | 통합 | 먼저 접수된 주문이 공급 전량 선점, 비싼 매수 우선, 매도 방향 대칭 |
 | `ValuationServiceTests` | 6 | 단위 | 총자산·평가손익 계산, 예수금 제외 수익률, 시세 미확보·다중 통화 시 생략 |
@@ -1281,7 +1303,7 @@ Redis cache, Pub/Sub, STOMP subscriber 처리의 일부 오류는 실시간 부�
 
 ### 17.5 현재 빌드 상태
 
-2026-10-06 기준 `./gradlew test`는 **138건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
+2026-10-13 기준 `./gradlew test`는 **149건 전부 통과**한다. Testcontainers를 쓰므로 실행 환경에 Docker가 필요하다.
 
 컴파일러는 `MatchingEngineStreamConsumer`의 unchecked/unsafe operation을 계속 경고한다. `OrderBookMatchingGateTests`도 `ValueOperations` mock의 generic 때문에 같은 경고를 낸다.
 

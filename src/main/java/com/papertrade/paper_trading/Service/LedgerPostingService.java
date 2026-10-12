@@ -38,6 +38,29 @@ public class LedgerPostingService {
         String description,
         List<Posting> postings
     ) {
+        return post(transactionType, idempotencyKey, description, null, postings);
+    }
+
+    /**
+     * 기존 거래를 상쇄하는 거래를 기록한다. 원거래는 수정하지 않고 그대로 남는다.
+     * 같은 원거래를 두 번 정정하는 것은 {@code reversal_of_id}의 unique 제약이 막는다.
+     */
+    public LedgerTransaction postReversal(
+        LedgerTransaction original,
+        String idempotencyKey,
+        String description,
+        List<Posting> postings
+    ) {
+        return post(LedgerTransactionType.ADJUSTMENT, idempotencyKey, description, original, postings);
+    }
+
+    private LedgerTransaction post(
+        LedgerTransactionType transactionType,
+        String idempotencyKey,
+        String description,
+        LedgerTransaction reversalOf,
+        List<Posting> postings
+    ) {
         if (postings.size() < 2) {
             throw new IllegalArgumentException("분개는 두 줄 이상이어야 합니다.");
         }
@@ -53,6 +76,7 @@ public class LedgerPostingService {
             .transactionType(transactionType)
             .idempotencyKey(idempotencyKey)
             .description(description)
+            .reversalOf(reversalOf)
             .build());
 
         for (Posting posting : postings) {

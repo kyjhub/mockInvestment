@@ -41,4 +41,8 @@ public interface HoldingRepository extends JpaRepository<Holding, Long> {
         @Param("accountId") Long accountId,
         @Param("stockId") Long stockId
     );
+
+    /** 이 계좌에 보유 row가 있는 종목. 수량이 0인 row도 포함한다. */
+    @Query("select h.stock.id from Holding h where h.account.id = :accountId")
+    List<Long> findStockIdsByAccountId(@Param("accountId") Long accountId);
 }

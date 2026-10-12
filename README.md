@@ -162,6 +162,15 @@ POST /api/v1/orders
 
 시세를 구하지 못한 종목이 있으면 평가 관련 필드만 `null`이고 나머지는 그대로 응답합니다. 평가손익률의 분모는 총매입금액입니다.
 
+### 관리자
+
+`ADMIN` 역할만 호출할 수 있습니다. 요청 본문에 `reason`(정정 사유)이 필수입니다.
+
+| Method | Endpoint | 설명 |
+| --- | --- | --- |
+| `POST` | `/api/v1/admin/ledger/accounts/{accountId}/cache-rebuild` | 원장 합계로 잔고·실현손익·보유 캐시를 다시 계산 |
+| `POST` | `/api/v1/admin/ledger/transactions/{transactionId}/reversal` | 잘못 기록된 원장 거래를 반대분개 (원거래는 그대로 남음) |
+
 ### 주문
 
 | Method | Endpoint | 설명 |

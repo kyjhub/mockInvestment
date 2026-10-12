@@ -28,6 +28,8 @@ public class SecurityConfig {
                 .requestMatchers("/ws").permitAll()
                 .requestMatchers("/ws/**").permitAll()
                 .requestMatchers("/actuator/health").permitAll()
+                // 원장 정정처럼 돈을 직접 움직이는 운영 기능. 일반 사용자는 접근할 수 없다.
+                .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
