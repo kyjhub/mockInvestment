@@ -572,13 +572,18 @@ Columns:
 | `idempotencyKey` | `idempotency_key` | `String` | Prevents recording the same event twice. `FILL:{tradeId}` for fills, `OPEN:{accountId}` for account opening | unique, not null, length 100 |
 | `occurredAt` | `occurred_at` | `LocalDateTime` | Event timestamp | not null, creation timestamp |
 | `description` | `description` | `String` | Human-readable description | nullable, length 255 |
-| `reversalOf` | `reversal_of_id` | `LedgerTransaction` | Original transaction when this is a correction | FK, nullable |
+| `reversalOf` | `reversal_of_id` | `LedgerTransaction` | Original transaction when this is a correction | FK, nullable, unique (V2) |
 
 Relations:
 
 - `LedgerTransaction` 1:N `LedgerEntry`
 - `LedgerTransaction` 1:N `Execution`
-- `LedgerTransaction` N:0..1 `LedgerTransaction` (`reversalOf`)
+- `LedgerTransaction` 0..1:0..1 `LedgerTransaction` (`reversalOf`). A transaction is reversed at most once; a reversal is never reversed again.
+
+Corrections (`LedgerCorrectionService`, admin API under `/api/v1/admin/ledger`):
+
+- Cache rebuild: overwrite `accounts.cash_balance`, `realized_profit`, and holdings from ledger sums. Adds no ledger rows.
+- Reversal: post an `ADJUSTMENT` transaction with key `REVERSAL:{originalId}` whose entries negate the original's amounts and quantities, and apply them to the caches in the same DB transaction. The original stays untouched. Rejected if any cash or holding would go negative.
 
 ## `LedgerEntry`
 

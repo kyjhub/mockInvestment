@@ -101,4 +101,23 @@ public class Holding {
 
         return costBasis;
     }
+
+    /**
+     * 원장 분개 하나만큼 보유를 움직인다. 반대분개가 원래 분개의 효과를 상쇄할 때 쓴다.
+     *
+     * <p>취득원가는 매도처럼 평균단가로 다시 계산하지 않고 분개 금액을 그대로 더한다. 보유 원가 대사의 기준이
+     * {@code Σ(SECURITIES 분개 금액)}이기 때문이다. 평균단가는 그 결과로 다시 구한다.
+     */
+    public void applyLedgerMovement(long quantityDelta, BigDecimal amountDelta) {
+        restoreFromLedger(this.quantity + quantityDelta, this.totalPurchaseAmount.add(amountDelta));
+    }
+
+    /** 원장에서 다시 계산한 수량과 취득원가로 덮어쓴다. 평균단가는 그 둘로 구한다. */
+    public void restoreFromLedger(long quantity, BigDecimal totalPurchaseAmount) {
+        this.quantity = quantity;
+        this.totalPurchaseAmount = totalPurchaseAmount.setScale(MONEY_SCALE, RoundingMode.HALF_UP);
+        this.averagePrice = quantity > 0
+            ? this.totalPurchaseAmount.divide(BigDecimal.valueOf(quantity), PRICE_SCALE, RoundingMode.HALF_UP)
+            : BigDecimal.ZERO.setScale(PRICE_SCALE, RoundingMode.HALF_UP);
+    }
 }

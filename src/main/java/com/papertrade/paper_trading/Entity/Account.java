@@ -85,4 +85,13 @@ public class Account {
     public void addRealizedProfit(BigDecimal profitAmount) {
         this.realizedProfit = this.realizedProfit.add(profitAmount);
     }
+
+    /**
+     * 원장에서 다시 계산한 값으로 잔고 캐시를 덮어쓴다. 원장이 원본이고 이 컬럼들은 캐시다.
+     * 대사가 캐시 불일치를 보고했을 때 관리자 정정({@code LedgerCorrectionService})만 호출한다.
+     */
+    public void restoreFromLedger(BigDecimal cashBalance, BigDecimal realizedProfit) {
+        this.cashBalance = cashBalance;
+        this.realizedProfit = realizedProfit;
+    }
 }

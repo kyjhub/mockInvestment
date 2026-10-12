@@ -3,6 +3,7 @@ package com.papertrade.paper_trading.Repository;
 import com.papertrade.paper_trading.Entity.LedgerEntry;
 import com.papertrade.paper_trading.Enum.LedgerAccount;
 import java.math.BigDecimal;
+import java.util.List;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -51,4 +52,15 @@ public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, Long> 
           and e.stock.id = :stockId
         """)
     long sumSecuritiesQuantity(@Param("accountId") Long accountId, @Param("stockId") Long stockId);
+
+    List<LedgerEntry> findByTransactionIdOrderByIdAsc(Long transactionId);
+
+    /** 이 계좌의 증권 분개가 있는 종목. 보유 캐시를 원장에서 다시 만들 때 대상이다. */
+    @Query("""
+        select distinct e.stock.id
+        from LedgerEntry e
+        where e.account.id = :accountId
+          and e.ledgerAccount = com.papertrade.paper_trading.Enum.LedgerAccount.SECURITIES
+        """)
+    List<Long> findSecuritiesStockIds(@Param("accountId") Long accountId);
 }

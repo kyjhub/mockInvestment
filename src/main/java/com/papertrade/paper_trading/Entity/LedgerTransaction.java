@@ -72,6 +72,7 @@ public class LedgerTransaction {
 
     /** 정정 거래면 원본 거래. 원본은 그대로 남는다. */
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "reversal_of_id")
+    // 한 거래는 한 번만 정정된다. V2 마이그레이션의 unique 제약이 같은 것을 DB에서 강제한다.
+    @JoinColumn(name = "reversal_of_id", unique = true)
     private LedgerTransaction reversalOf;
 }
