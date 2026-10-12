@@ -17,7 +17,7 @@
 | 애플리케이션 | Java 21, Spring Boot 3.5 |
 | HTTP API | Spring Web MVC |
 | 인증·인가 | Spring Security, JWT (jjwt), BCrypt |
-| 영속성 | Spring Data JPA, PostgreSQL |
+| 영속성 | Spring Data JPA, PostgreSQL, Flyway |
 | 캐시·분산 상태 | Spring Data Redis |
 | 이벤트 처리 | Redis Stream (Consumer Group, PEL, DLQ) |
 | 서버 간 전파 | Redis Pub/Sub |
@@ -229,7 +229,7 @@ export TOSS_WS_ENABLED=true            # false면 호가도 REST 폴링으로만
 ./gradlew bootRun
 ```
 
-DB 마이그레이션 도구가 아직 없어서 스키마는 별도로 준비해야 합니다. 로컬에서는 `spring.jpa.hibernate.ddl-auto`로 대신할 수 있습니다.
+스키마는 Flyway가 기동할 때 `src/main/resources/db/migration`의 마이그레이션으로 만듭니다. Hibernate는 엔티티와 테이블이 맞는지만 검증(`ddl-auto: validate`)하므로, 스키마를 바꿀 때는 엔티티와 함께 `V2__설명.sql`처럼 새 마이그레이션 파일을 추가해야 합니다. Flyway 도입 전에 만든 로컬 DB는 볼륨을 지우고 새로 만드는 것을 권장합니다.
 
 ### 테스트
 
@@ -307,7 +307,7 @@ src/main/java/com/papertrade/paper_trading/
 - 종목별 보유 자산 조회 API, 주문·체결 내역 조회 API
 - 일별 계좌 스냅샷, 리더보드
 - 종목 마스터 적재, 환율 연동
-- DLQ 관리 API, DB 마이그레이션 도구
+- DLQ 관리 API
 
 > 회원가입이 계좌를 만들지 않기 때문에, 계좌를 별도로 생성하지 않은 신규 사용자는 주문 API에서 오류가 납니다.
 
